@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kalshi BTC Bot</title>
+<style>
+:root {
+  --bg:       #080d18;
+  --surface:  #0f1623;
+  --card:     #141d2e;
+  --border:   #1e2d45;
+  --accent:   #2563eb;
+  --green:    #10b981;
+  --red:      #ef4444;
+  --yellow:   #f59e0b;
+  --text:     #e2e8f0;
+  --muted:    #64748b;
+  --mono:     'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --radius:   6px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+/* ── Top bar ──────────────────────────────────────────────────────────── */
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+#logo {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+#contract-label {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+#contract-ticker {
+  color: var(--text);
+  font-size: 12px;
+}
+.window-bar-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 120px;
+}
+.progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+#progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  transition: width 1s linear, background 0.3s;
+}
+#time-left {
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 40px;
+  text-align: right;
+}
+.feed-dots {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  position: relative;
+}
+.dot.live { background: var(--green); animation: pulse 2s infinite; }
+.dot.dead { background: var(--red); }
+.dot-label { font-size: 10px; color: var(--muted); }
+@keyframes pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(16,185,129,.4); }
+  50%      { box-shadow: 0 0 0 4px rgba(16,185,129,0); }
+}
+#kill-btn {
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid var(--red);
+  color: var(--red);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  transition: background .15s;
+  white-space: nowrap;
+}
+#kill-btn:hover { background: rgba(239,68,68,.15); }
+#kill-btn.active { background: var(--red); color: #fff; }
+
+/* ── Layout ───────────────────────────────────────────────────────────── */
+#main {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── Metric cards ─────────────────────────────────────────────────────── */
+#metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.metric-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.metric-label {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+}
+.metric-value.pos { color: var(--green); }
+.metric-value.neg { color: var(--red); }
+
+/* ── Mid row: BTC + Signals ──────────────────────────────────────────── */
+#mid-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+/* ── Panels ───────────────────────────────────────────────────────────── */
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.panel-body { padding: 12px 14px; }
+
+/* ── BTC panel ───────────────────────────────────────────────────────── */
+#btc-price {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -1px;
+  margin-bottom: 4px;
+}
+.btc-delta { font-size: 13px; }
+.btc-delta.pos { color: var(--green); }
+.btc-delta.neg { color: var(--red); }
+
+#sparkline-wrap {
+  margin: 10px 0;
+  background: var(--surface);
+  border-radius: 4px;
+  overflow: hidden;
+}
+#sparkline { display: block; width: 100%; height: 60px; }
+
+.fv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  margin-top: 8px;
+}
+.fv-row { display: flex; justify-content: space-between; align-items: center; }
+.fv-key { color: var(--muted); font-size: 11px; }
+.fv-val { font-size: 13px; font-weight: 600; }
+#gap-val { font-weight: 700; }
+
+/* ── Signal feed ──────────────────────────────────────────────────────── */
+#signal-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.signal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border-radius: 4px;
+  font-size: 11px;
+  border-left: 3px solid transparent;
+}
+.signal-row.yes { border-color: var(--green); }
+.signal-row.no  { border-color: var(--red); }
+.signal-side {
+  font-weight: 700;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 1px;
+}
+.signal-side.yes { background: rgba(16,185,129,.2); color: var(--green); }
+.signal-side.no  { background: rgba(239,68,68,.2);  color: var(--red); }
+.signal-acted { color: var(--accent); font-size: 10px; margin-left: auto; }
+.signal-ts { color: var(--muted); font-size: 10px; min-width: 56px; }
+
+/* ── Positions table ──────────────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th {
+  padding: 6px 10px;
+  text-align: left;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: 600;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(30,45,69,.5);
+  white-space: nowrap;
+}
+tr:last-child td { border-bottom: none; }
+.pos-pnl.pos { color: var(--green); }
+.pos-pnl.neg { color: var(--red); }
+.empty-row td { color: var(--muted); text-align: center; padding: 20px; }
+.side-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+.side-badge.yes { background: rgba(16,185,129,.15); color: var(--green); }
+.side-badge.no  { background: rgba(239,68,68,.15);  color: var(--red); }
+
+/* ── Event log ────────────────────────────────────────────────────────── */
+#event-log {
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+#event-log span { color: var(--text); }
+
+/* ── Scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── Connection banner ────────────────────────────────────────────────── */
+#conn-banner {
+  display: none;
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--yellow);
+  color: #000;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 16px;
+  border-radius: 20px;
+  letter-spacing: 1px;
+  z-index: 999;
+}
+</style>
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────────────────────────── -->
+<div id="topbar">
+  <span id="logo">KALSHI BTC</span>
+  <div style="display:flex;flex-direction:column;gap:1px">
+    <span id="contract-label">NO CONTRACT</span>
+    <span id="contract-ticker" style="font-size:11px;color:var(--muted)">—</span>
+  </div>
+  <div class="window-bar-wrap">
+    <div class="progress-track"><div id="progress-fill"></div></div>
+    <span id="time-left">--:--</span>
+  </div>
+  <div class="feed-dots">
+    <div class="dot" id="dot-btc" title="BTC feed"></div>
+    <span class="dot-label">BTC</span>
+    <div class="dot" id="dot-kalshi" title="Kalshi feed" style="margin-left:6px"></div>
+    <span class="dot-label">KALSHI</span>
+  </div>
+  <span id="mode-badge" style="padding:4px 10px;border:1px solid var(--border);border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">PAPER</span>
+  <span id="velocity-badge" style="display:none;padding:4px 10px;background:var(--yellow);color:#000;border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">⚡ VELOCITY PAUSE</span>
+  <span id="session-uptime" style="color:var(--muted);font-size:10px;white-space:nowrap">UP 0s</span>
+  <button id="kill-btn" onclick="sendKill()">KILL SWITCH</button>
+</div>
+
+<!-- ── Main ─────────────────────────────────────────────────────────────── -->
+<div id="main">
+
+  <!-- Metric cards -->
+  <div id="metrics" style="grid-template-columns: repeat(5, 1fr)">
+    <div class="metric-card">
+      <div class="metric-label">Balance</div>
+      <div class="metric-value" id="m-balance">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Net P&amp;L (after fees)</div>
+      <div class="metric-value" id="m-netpnl">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Session Fees</div>
+      <div class="metric-value" id="m-fees" style="color:var(--yellow)">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Win Rate</div>
+      <div class="metric-value" id="m-winrate">—</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Open Positions</div>
+      <div class="metric-value" id="m-positions">0</div>
+    </div>
+  </div>
+
+  <!-- BTC + Signals row -->
+  <div id="mid-row">
+
+    <!-- BTC panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>BTC Feed (Coinbase BTC-USD)</span>
+        <span id="btc-tick" style="color:var(--muted);font-size:10px">—</span>
+      </div>
+      <div class="panel-body">
+        <div id="btc-price">—</div>
+        <div id="sparkline-wrap">
+          <svg id="sparkline" viewBox="0 0 400 60" preserveAspectRatio="none">
+            <polyline id="spark-line"
+              points=""
+              fill="none"
+              stroke="#2563eb"
+              stroke-width="1.5"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </div>
+        <div class="fv-grid">
+          <div class="fv-row"><span class="fv-key">Strike (Window Open)</span><span class="fv-val" id="fv-baseline">—</span></div>
+          <div class="fv-row"><span class="fv-key">Fair Value</span>     <span class="fv-val" id="fv-fv">—</span></div>
+          <div class="fv-row"><span class="fv-key">Chg vs Baseline</span><span class="fv-val" id="fv-change">—</span></div>
+          <div class="fv-row"><span class="fv-key">Kalshi Mid</span>     <span class="fv-val" id="fv-mid">—</span></div>
+          <div class="fv-row"><span class="fv-key">UP Ask</span>        <span class="fv-val" id="fv-yes-ask" style="color:var(--green)">—</span></div>
+          <div class="fv-row"><span class="fv-key">DOWN Ask</span>         <span class="fv-val" id="fv-no-ask"  style="color:var(--red)">—</span></div>
+          <div class="fv-row"><span class="fv-key">Gap</span>            <span class="fv-val" id="gap-val">—</span></div>
+          <div class="fv-row" style="grid-column:1/-1"><span class="fv-key">Last Settled</span> <span class="fv-val" id="fv-last-settled" style="color:var(--muted);font-size:11px">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Signal feed panel -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Signal Feed</span>
+        <span id="signal-count" style="color:var(--accent)">0 signals</span>
+      </div>
+      <div class="panel-body">
+        <div id="signal-list"><div style="color:var(--muted);text-align:center;padding:20px 0">No signals yet</div></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Open positions -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Open Positions</span>
+      <span id="pos-session-pnl" style="font-size:11px">Session P&L: —</span>
+    </div>
+    <div class="panel-body" style="padding:0">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Side</th><th>Contract</th>
+              <th>Entry ¢</th><th>Stop ¢</th><th>Current ¢</th><th>Qty</th>
+              <th>Cost</th><th>Gross P&amp;L</th><th>Est. Fees</th><th>Net P&amp;L</th><th>Hold</th>
+            </tr>
+          </thead>
+          <tbody id="positions-tbody">
+            <tr class="empty-row"><td colspan="12">No open positions</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Event log -->
+  <div class="panel">
+    <div class="panel-header"><span>Event Log</span></div>
+    <div class="panel-body"><div id="event-log">Waiting for events…</div></div>
+  </div>
+
+</div>
+
+<div id="conn-banner">RECONNECTING…</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let lastState = {};
+let ws;
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen    = () => { document.getElementById('conn-banner').style.display = 'none'; };
+  ws.onmessage = e  => { try { render(JSON.parse(e.data)); } catch(_){} };
+  ws.onclose   = () => {
+    document.getElementById('conn-banner').style.display = 'block';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror   = () => ws.close();
+}
+
+// ── Main render ────────────────────────────────────────────────────────────
+function render(s) {
+  lastState = s;
+  renderTopBar(s);
+  renderMetrics(s);
+  renderBtc(s);
+  renderSignals(s);
+  renderPositions(s);
+  renderEventLog(s);
+}
+
+// ── Top bar ────────────────────────────────────────────────────────────────
+function renderTopBar(s) {
+  const el = document.getElementById('contract-label');
+  el.textContent = s.active_contract || 'NO CONTRACT';
+  if (s.btc_open > 0) {
+    const chg = s.btc_change || 0;
+    const sign = chg >= 0 ? '+' : '';
+    document.getElementById('contract-ticker').textContent =
+      `Strike $${fmt(s.btc_open)}  Chg ${sign}$${chg.toFixed(2)}`;
+  } else {
+    document.getElementById('contract-ticker').textContent = '—';
+  }
+
+  document.getElementById('dot-btc').className   = 'dot ' + (s.btc_feed_active   ? 'live' : 'dead');
+  document.getElementById('dot-kalshi').className = 'dot ' + (s.kalshi_feed_active ? 'live' : 'dead');
+
+  const modeBadge = document.getElementById('mode-badge');
+  const mode = (s.trading_mode || 'paper').toUpperCase();
+  modeBadge.textContent = mode;
+  modeBadge.style.borderColor = mode === 'LIVE' ? 'var(--red)' : 'var(--border)';
+  modeBadge.style.color = mode === 'LIVE' ? 'var(--red)' : 'var(--muted)';
+
+  document.getElementById('velocity-badge').style.display = s.velocity_pause ? 'inline-block' : 'none';
+
+  if (s.session_start_ts) {
+    const elapsed = Date.now() / 1000 - s.session_start_ts;
+    document.getElementById('session-uptime').textContent = 'UP ' + fmtTime(elapsed);
+  }
+
+  const killBtn = document.getElementById('kill-btn');
+  killBtn.classList.toggle('active', !!s.kill_switch);
+  killBtn.textContent = s.kill_switch ? '⛔ KILLED' : 'KILL SWITCH';
+
+  renderWindowProgress(s);
+}
+
+function renderWindowProgress(s) {
+  const left = Math.max(0, s.window_seconds_left || 0);
+  const total = 900;
+  const pct   = Math.min(100, (1 - left / total) * 100);
+  const fill  = document.getElementById('progress-fill');
+  fill.style.width = pct + '%';
+  if (pct > 85) fill.style.background = 'linear-gradient(90deg,#f59e0b,#ef4444)';
+  else          fill.style.background = 'linear-gradient(90deg,#2563eb,#10b981)';
+
+  const m   = Math.floor(left / 60);
+  const sec = Math.floor(left % 60);
+  document.getElementById('time-left').textContent =
+    m + ':' + String(sec).padStart(2, '0');
+}
+
+// ── Metrics ────────────────────────────────────────────────────────────────
+function renderMetrics(s) {
+  setVal('m-balance',   '$' + (s.balance || 0).toFixed(2));
+  setVal('m-winrate',   s.win_rate != null ? (s.win_rate * 100).toFixed(1) + '%' : '—');
+  setVal('m-positions', s.open_position_count || 0);
+
+  // Net P&L = session_pnl (fees already deducted at close) + unrealized from open positions
+  const mid = s.orderbook && s.orderbook.mid != null ? s.orderbook.mid : null;
+  const feePct = s.taker_fee_pct || 0.07;
+  let unrealizedGross = 0, unrealizedFees = 0;
+  for (const p of (s.open_positions || [])) {
+    const cur = mid != null ? (p.side === 'yes' ? mid : 100 - mid) : (p.current_price || 0);
+    unrealizedGross += (cur - p.entry_price) * p.qty / 100.0;
+    // Estimate exit fee on current value
+    unrealizedFees += cur * p.qty / 100.0 * feePct;
+  }
+  const totalNetPnl = (s.session_pnl || 0) + unrealizedGross - unrealizedFees;
+  const totalFees = (s.session_fees_usd || 0) + unrealizedFees;
+
+  const netEl = document.getElementById('m-netpnl');
+  netEl.textContent = (totalNetPnl >= 0 ? '+' : '') + '$' + totalNetPnl.toFixed(2);
+  netEl.classList.toggle('pos', totalNetPnl > 0);
+  netEl.classList.toggle('neg', totalNetPnl < 0);
+
+  setVal('m-fees', '-$' + totalFees.toFixed(4));
+}
+
+// ── BTC panel ─────────────────────────────────────────────────────────────
+function renderBtc(s) {
+  const price = s.btc_price || 0;
+  document.getElementById('btc-price').textContent = price > 0 ? '$' + fmt(price) : '—';
+
+  document.getElementById('btc-tick').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
+
+  // Sparkline
+  if (s.btc_history && s.btc_history.length > 1) {
+    renderSparkline(s.btc_history.map(p => p[1]));
+  }
+
+  // Window baseline and change
+  if (s.btc_open > 0) {
+    setVal('fv-baseline', '$' + fmt(s.btc_open));
+    const chg = s.btc_change || 0;
+    const sign = chg >= 0 ? '+' : '';
+    const chgEl = document.getElementById('fv-change');
+    chgEl.textContent = sign + '$' + chg.toFixed(2);
+    chgEl.style.color = chg >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  // Fair value info (from latest signal)
+  const sig = s.signals && s.signals[0];
+  if (sig) {
+    setVal('fv-fv',  sig.fair_value.toFixed(1) + '¢');
+    setVal('fv-mid', sig.kalshi_mid.toFixed(1) + '¢');
+    const gapEl = document.getElementById('gap-val');
+    const gapCents = Math.abs(sig.fair_value - sig.kalshi_mid).toFixed(1);
+    const gapPct   = (sig.gap_pct * 100).toFixed(1);
+    gapEl.textContent = gapCents + '¢ (' + gapPct + '%)';
+    gapEl.style.color = sig.gap_pct > 0.12 ? 'var(--yellow)' : 'var(--text)';
+  }
+
+  // Orderbook mid, UP ask, DOWN ask
+  if (s.orderbook) {
+    if (s.orderbook.mid != null)      setVal('fv-mid',     s.orderbook.mid.toFixed(1)               + '¢');
+    if (s.orderbook.best_ask != null) setVal('fv-yes-ask', s.orderbook.best_ask.toFixed(1)          + '¢');
+    if (s.orderbook.best_bid != null) setVal('fv-no-ask',  (100 - s.orderbook.best_bid).toFixed(1)  + '¢');
+  }
+
+  // Last settled
+  if (s.last_settlement_msg) {
+    const el = document.getElementById('fv-last-settled');
+    if (el) {
+      el.textContent = s.last_settlement_msg;
+      el.style.color = s.last_settlement_msg.includes('→ YES') ? 'var(--green)'
+                     : s.last_settlement_msg.includes('→ NO')  ? 'var(--red)'
+                     : 'var(--muted)';
+    }
+  }
+}
+
+function renderSparkline(prices) {
+  if (prices.length < 2) return;
+  const W = 400, H = 60, PAD = 2;
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const range = max - min || 1;
+  const pts = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * W;
+    const y = H - PAD - ((p - min) / range) * (H - PAD * 2);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+  document.getElementById('spark-line').setAttribute('points', pts);
+}
+
+// ── Signals ────────────────────────────────────────────────────────────────
+function renderSignals(s) {
+  const list  = document.getElementById('signal-list');
+  const sigs  = s.signals || [];
+  document.getElementById('signal-count').textContent = sigs.length + ' signals';
+
+  if (!sigs.length) {
+    list.innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px 0">No signals yet</div>';
+    return;
+  }
+
+  list.innerHTML = sigs.slice(0, 15).map(sg => {
+    const t    = new Date(sg.timestamp * 1000).toLocaleTimeString('en-US', { hour12: false });
+    const gap  = (sg.gap_pct * 100).toFixed(1) + '%';
+    const conf = (sg.confidence * 100).toFixed(0) + '%';
+    const yask = sg.yes_ask > 0 ? sg.yes_ask.toFixed(1) + '¢' : '—';
+    const nask = sg.no_ask  > 0 ? sg.no_ask.toFixed(1)  + '¢' : '—';
+    return `
+      <div class="signal-row ${sg.side}">
+        <span class="signal-ts">${t}</span>
+        <span class="signal-side ${sg.side}">${sg.side.toUpperCase()}</span>
+        <span>BTC $${fmt(sg.btc_price)}</span>
+        <span style="color:var(--muted)">FV ${sg.fair_value.toFixed(1)}¢</span>
+        <span style="color:var(--muted)">mid ${sg.kalshi_mid.toFixed(1)}¢</span>
+        <span style="color:var(--red)">Y@ ${yask}</span>
+        <span style="color:var(--green)">N@ ${nask}</span>
+        <span style="color:var(--yellow)">gap ${gap}</span>
+        <span style="color:var(--muted)">conf ${conf}</span>
+        ${sg.acted ? '<span class="signal-acted">● ACTED</span>' : ''}
+      </div>`;
+  }).join('');
+}
+
+// ── Positions ──────────────────────────────────────────────────────────────
+function renderPositions(s) {
+  const tbody = document.getElementById('positions-tbody');
+  const poss  = s.open_positions || [];
+
+  const mid    = s.orderbook && s.orderbook.mid != null ? s.orderbook.mid : null;
+  const feePct = s.taker_fee_pct || 0.07;
+
+  // Session header: gross net P&L (closed) + unrealized
+  let unrealizedGross = 0, unrealizedFees = 0;
+  for (const p of poss) {
+    const cur = mid != null ? (p.side === 'yes' ? mid : 100 - mid) : (p.current_price || 0);
+    unrealizedGross += (cur - p.entry_price) * p.qty / 100.0;
+    unrealizedFees  += cur * p.qty / 100.0 * feePct;
+  }
+  const totalNet = (s.session_pnl || 0) + unrealizedGross - unrealizedFees;
+  const pnlEl = document.getElementById('pos-session-pnl');
+  pnlEl.textContent = 'Net P&L (incl. fees): ' + (totalNet >= 0 ? '+' : '') + '$' + totalNet.toFixed(2);
+  pnlEl.style.color = totalNet > 0 ? 'var(--green)' : totalNet < 0 ? 'var(--red)' : '';
+
+  if (!poss.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="12">No open positions</td></tr>';
+    return;
+  }
+
+  const now = Date.now() / 1000;
+  tbody.innerHTML = poss.map(p => {
+    const cur       = mid != null ? (p.side === 'yes' ? mid : 100 - mid) : (p.current_price || 0);
+    const grossPnl  = (cur - p.entry_price) * p.qty / 100.0;
+    // Total est. fees = entry fee (already paid) + estimated exit fee
+    const exitFee   = cur * p.qty / 100.0 * feePct;
+    const totalFee  = (p.fees_usd || 0) + exitFee;
+    const netPnl    = grossPnl - totalFee;
+    const netClass  = netPnl >= 0 ? 'pos' : 'neg';
+    const netSign   = netPnl >= 0 ? '+' : '';
+    const grossSign = grossPnl >= 0 ? '+' : '';
+    const grossClass = grossPnl >= 0 ? 'pos' : 'neg';
+    const hold      = fmtTime(now - p.entry_time);
+    const stopTxt   = p.stop_price > 0 ? p.stop_price.toFixed(1) : '—';
+    return `
+      <tr>
+        <td>${p.id}</td>
+        <td><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
+        <td style="color:var(--muted)">${fmtContract(p.market_ticker)}</td>
+        <td>${p.entry_price.toFixed(1)}</td>
+        <td style="color:var(--yellow)">${stopTxt}</td>
+        <td>${cur.toFixed(1)}</td>
+        <td>${p.qty}</td>
+        <td>$${p.cost_usd.toFixed(2)}</td>
+        <td class="pos-pnl ${grossClass}">${grossSign}$${grossPnl.toFixed(2)}</td>
+        <td style="color:var(--yellow)">-$${totalFee.toFixed(4)}</td>
+        <td class="pos-pnl ${netClass}">${netSign}$${netPnl.toFixed(2)}</td>
+        <td>${hold}</td>
+      </tr>`;
+  }).join('');
+}
+
+// ── Event log ──────────────────────────────────────────────────────────────
+function renderEventLog(s) {
+  const el   = document.getElementById('event-log');
+  const logs = s.event_log || [];
+  if (!logs.length) return;
+  el.innerHTML = logs.map(line => {
+    const ts   = line.match(/^\[[\d:]+\]/)?.[0] || '';
+    const body = line.slice(ts.length);
+    return `<div>${ts} <span>${escHtml(body)}</span></div>`;
+  }).join('');
+}
+
+// ── Kill switch ────────────────────────────────────────────────────────────
+async function sendKill() {
+  if (!confirm('Activate kill switch? No new positions will be opened.')) return;
+  await fetch('/api/kill', { method: 'POST' });
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function setVal(id, v)  { const el = document.getElementById(id); if (el) el.textContent = v; }
+function fmt(n)         { return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function escHtml(s)     { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtTime(sec) {
+  if (sec < 60)  return sec.toFixed(0) + 's';
+  if (sec < 3600) return (sec / 60).toFixed(1) + 'm';
+  return (sec / 3600).toFixed(1) + 'h';
+}
+function fmtContract(ticker) {
+  // Extract HHMM from ticker like KXBTCD-26MAY111615-15 → "16:15"
+  const m = ticker.match(/(\d{4})-\d+$/);
+  if (!m) return ticker;
+  return m[1].slice(0, 2) + ':' + m[1].slice(2);
+}
+
+// ── Local clock tick (updates progress bar + positions without waiting for WS)
+setInterval(() => {
+  if (!lastState.window_close_ts) return;
+  lastState.window_seconds_left = Math.max(0, lastState.window_close_ts - Date.now() / 1000);
+  renderWindowProgress(lastState);
+  if (lastState.open_positions) renderPositions(lastState);
+}, 500);
+
+connect();
+</script>
+</body>
+</html>
