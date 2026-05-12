@@ -18,7 +18,7 @@ The bot watches the BTC price and Kalshi orderbook without acting. It uses this 
 After the monitoring phase, if conditions align, the bot buys the contract on the side BTC is trending — but only when:
 - The contract is priced at **60–85¢** (confirmed direction, still room to run)
 - BTC has moved at least **$30** from the window open
-- Pre-window BTC technicals (RSI, ADX, Bollinger Bands from Binance) agree with the direction
+- Pre-window BTC technicals (RSI, ADX, Bollinger Bands from Coinbase 1-min candles) agree with the direction
 - The Kalshi price has crossed 50¢ no more than twice during monitoring
 - At least 60% of recent price steps moved further from 50¢ (steady, not choppy)
 
@@ -85,7 +85,7 @@ main.py
   -> StateManager.broadcast_loop()  WebSocket push to dashboard
   -> KalshiFeed.run()               REST contract discovery + WS orderbook
   -> BtcFeed.run()                  Coinbase BTC-USD reference price
-  -> Scalper.run()                  signal generation + Binance technicals
+  -> Scalper.run()                  signal generation + Coinbase technicals
   -> PaperTrader / LiveTrader       position management and exits
   -> RiskManager.run()              daily loss kill switch
   -> FastAPI/Uvicorn                dashboard server
@@ -93,9 +93,9 @@ main.py
 
 All components share a single `StateManager` in-memory hub. Feeds write into it, the scalper reads from it, the trader records positions in it, and the dashboard streams snapshots from it over WebSocket.
 
-## Technicals (Binance, free, no auth)
+## Technicals (Coinbase Exchange, free, no auth)
 
-Every 60 seconds the bot fetches 50 one-minute candles from `api.binance.com` and computes:
+Every 60 seconds the bot fetches 50 one-minute candles from `api.exchange.coinbase.com` and computes:
 
 | Indicator | Signal |
 |---|---|
@@ -127,8 +127,8 @@ Majority of points sets the bias (`up` / `down` / `neutral`). When `BIAS_GATE_EN
 | `MAX_LINE_CROSSINGS` | `2` | Max times Kalshi mid may cross 50¢ during monitoring |
 | `MIN_DIRECTION_CONSISTENCY` | `0.6` | Min fraction of recent steps trending away from 50¢ |
 | `KALSHI_MID_MAX_RANGE_CENTS` | `22` | Max ¢ range in last 60s before market is too erratic |
-| `BIAS_GATE_ENABLED` | `true` | Block entries when Binance RSI/BB contradicts direction |
-| `BINANCE_SYMBOL` | `BTCUSDT` | Symbol for Binance klines fetch |
+| `BIAS_GATE_ENABLED` | `true` | Block entries when RSI/BB contradicts direction |
+| `BINANCE_SYMBOL` | `BTC-USD` | Coinbase product ID for candle fetch |
 | `CONFIDENCE_THRESHOLD` | `0.45` | Minimum confidence score to act on a signal |
 | `SIGNAL_DEBOUNCE_S` | `2.0` | Minimum seconds between signals |
 | `MAX_CONCURRENT_POSITIONS` | `1` | Maximum open positions at once |
@@ -155,7 +155,7 @@ feeds/btc_feed.py            Coinbase BTC-USD reference price feed
 execution/kalshi_client.py   authenticated Kalshi REST order client
 execution/live_trader.py     live FOK order execution and position monitor
 strategy/scalper.py          signal generation, monitoring phase, entry gates
-strategy/technicals.py       Binance klines fetch, RSI / ADX / BB computation
+strategy/technicals.py       Coinbase candle fetch, RSI / ADX / BB computation
 simulation/paper_trader.py   paper portfolio, take profit, stop loss, force exit
 risk/risk_manager.py         position limits and daily loss kill switch
 logger/event_logger.py       in-memory event buffer and async CSV flush

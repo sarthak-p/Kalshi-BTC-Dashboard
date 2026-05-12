@@ -168,6 +168,8 @@ class Scalper:
         ob: Orderbook = self.state.orderbook
 
         if not contract or btc <= 0 or btc_open <= 0:
+            self.state.live_conditions["phase"] = "waiting"
+            self.state.live_conditions["ready"] = False
             return None
 
         now = time.time()
@@ -179,6 +181,22 @@ class Scalper:
         fv = fair_value_yes_cents(btc, btc_open, tau_seconds, sigma)
         predicted_close = _predict_btc_close(history, btc, tau_seconds)
         await self.state.update_prediction(fv, predicted_close)
+
+        # ── Compute window phase for the dashboard ────────────────────────────
+        if tau_seconds > self.cfg.max_entry_window_s:
+            phase = "monitoring"
+        elif tau_seconds >= self.cfg.min_entry_window_s:
+            phase = "entry_open"
+        elif tau_seconds >= self.cfg.force_exit_tau_s:
+            phase = "no_more_entries"
+        else:
+            phase = "force_exit"
+
+        # Shorthand to write conditions without a full copy every tick
+        conds = self.state.live_conditions
+        conds["phase"] = phase
+        conds["ready"] = False
+        conds["block_reason"] = None
 
         # ── Trading gates ─────────────────────────────────────────────────────
         if len(self.state.open_positions) >= self.cfg.max_concurrent_positions:
@@ -202,87 +220,102 @@ class Scalper:
         # ── BTC direction ─────────────────────────────────────────────────────
         btc_change = btc - btc_open
         side = "yes" if btc_change > 0 else "no"
+        conds["side"] = side
 
         yes_ask = ob.best_ask() or 0.0
         no_ask = (100.0 - ob.best_bid()) if ob.best_bid() is not None else 0.0
         entry_price = yes_ask if side == "yes" else no_ask
+        conds["entry_price"] = round(entry_price, 1)
+        conds["price_in_range"] = (
+            self.cfg.min_entry_price_cents <= entry_price <= self.cfg.max_entry_price_cents
+        )
 
         # ── "Away from the line" checks — replicating the human edge ─────────
-        #
-        # The manual strategy watches two things on the Kalshi contract price:
-        #   1. How many times has it crossed 50¢ during monitoring?
-        #      Few crossings = price committed to one side = good signal.
-        #   2. Is it consistently moving FURTHER from 50¢, or oscillating?
-        #      Steady march away = "slow and methodical" = tradeable.
-        #      Whipsawing = skip.
-
         monitoring_start = self.state.window_discovered_ts + self.cfg.new_window_settle_s
         monitoring_mids = [(ts, m) for ts, m in self.state.kalshi_mid_history
                            if ts >= monitoring_start]
 
         if len(monitoring_mids) >= 10:
-            # 1. Line crossing count: how many times did mid cross 50¢?
+            # 1. Line crossing count
             crossings = sum(
                 1 for i in range(1, len(monitoring_mids))
                 if (monitoring_mids[i][1] - 50.0) * (monitoring_mids[i - 1][1] - 50.0) < 0
             )
+            conds["line_crossings"] = crossings
+            conds["crossings_ok"] = crossings <= self.cfg.max_line_crossings
             if crossings > self.cfg.max_line_crossings:
+                conds["block_reason"] = "price_too_choppy"
                 await self._log_blocked("price_too_choppy", crossings=crossings,
                                         max=self.cfg.max_line_crossings)
                 return None
 
-            # 2. Direction consistency over the last 2 min: what fraction of
-            #    30-second steps moved the mid FURTHER from 50¢?
-            recent_mids = [(ts, m) for ts, m in monitoring_mids if ts >= now - 120.0]
-            if len(recent_mids) >= 6:
-                step = len(recent_mids) // 6
-                steps_away = 0
-                for i in range(5):
-                    m0 = recent_mids[i * step][1]
-                    m1 = recent_mids[(i + 1) * step][1]
-                    # Moving further from 50¢ in the trade direction?
-                    if side == "yes" and m1 > m0:
-                        steps_away += 1
-                    elif side == "no" and m1 < m0:
-                        steps_away += 1
-                consistency = steps_away / 5.0
-                if consistency < self.cfg.min_direction_consistency:
-                    await self._log_blocked("direction_inconsistent",
-                                            consistency=round(consistency, 2),
-                                            min=self.cfg.min_direction_consistency)
-                    return None
+            # 2. Direction consistency — skip if price already ≥20¢ from the line
+            price_distance = abs(mid - 50.0)
+            if price_distance < 20.0:
+                recent_mids = [(ts, m) for ts, m in monitoring_mids if ts >= now - 120.0]
+                if len(recent_mids) >= 6:
+                    step = len(recent_mids) // 6
+                    steps_away = 0
+                    for i in range(5):
+                        m0 = recent_mids[i * step][1]
+                        m1 = recent_mids[(i + 1) * step][1]
+                        if side == "yes" and m1 >= m0:
+                            steps_away += 1
+                        elif side == "no" and m1 <= m0:
+                            steps_away += 1
+                    consistency = steps_away / 5.0
+                    conds["direction_score"] = round(consistency, 2)
+                    conds["direction_ok"] = consistency >= self.cfg.min_direction_consistency
+                    if consistency < self.cfg.min_direction_consistency:
+                        conds["block_reason"] = "direction_inconsistent"
+                        await self._log_blocked("direction_inconsistent",
+                                                consistency=round(consistency, 2),
+                                                min=self.cfg.min_direction_consistency)
+                        return None
+            else:
+                # Price deeply committed — consistency check skipped
+                conds["direction_score"] = None
+                conds["direction_ok"] = True
+        else:
+            conds["line_crossings"] = None
+            conds["crossings_ok"] = None
+            conds["direction_score"] = None
+            conds["direction_ok"] = None
 
-        # ── Slow-market filter: block entries during erratic price swings ────
+        # ── Slow-market filter ────────────────────────────────────────────────
         recent_mids_60 = [(ts, m) for ts, m in self.state.kalshi_mid_history
                           if ts >= now - 60.0]
         if len(recent_mids_60) >= 5:
             mid_range = max(m for _, m in recent_mids_60) - min(m for _, m in recent_mids_60)
             if mid_range > self.cfg.kalshi_mid_max_range_cents:
+                conds["block_reason"] = "market_too_erratic"
                 await self._log_blocked("market_too_erratic", range_cents=round(mid_range, 1))
                 return None
 
-        # ── Pre-window bias gate: skip if technicals contradict direction ─────
+        # ── Pre-window bias gate ──────────────────────────────────────────────
+        bias_dir = self.state.pre_window_bias
+        bias_ok = True
         if self.cfg.bias_gate_enabled:
-            bias_dir = self.state.pre_window_bias
             if side == "yes" and bias_dir == "down":
-                await self._log_blocked("bias_disagrees", side="yes", bias=bias_dir,
-                                        rsi=round(self.state.tech_rsi, 1))
-                return None
-            if side == "no" and bias_dir == "up":
-                await self._log_blocked("bias_disagrees", side="no", bias=bias_dir,
-                                        rsi=round(self.state.tech_rsi, 1))
-                return None
+                bias_ok = False
+            elif side == "no" and bias_dir == "up":
+                bias_ok = False
+        conds["bias_ok"] = bias_ok
+        if not bias_ok:
+            conds["block_reason"] = "bias_disagrees"
+            await self._log_blocked("bias_disagrees", side=side, bias=bias_dir,
+                                    rsi=round(self.state.tech_rsi, 1))
+            return None
 
-        # ── Single entry window: after monitoring phase ───────────────────────
-        #
-        # No entries for the first ~7 min (while BTC direction is forming).
-        # Only trade when [min_entry_window_s, max_entry_window_s] seconds remain.
-
+        # ── Single entry window ───────────────────────────────────────────────
         if not (self.cfg.min_entry_window_s <= tau_seconds <= self.cfg.max_entry_window_s):
             return None
 
-        # BTC must show clear directional momentum from the monitoring period
-        if abs(btc_change) < self.cfg.momentum_entry_usd:
+        # ── BTC momentum gate ─────────────────────────────────────────────────
+        btc_move_ok = abs(btc_change) >= self.cfg.momentum_entry_usd
+        conds["btc_move_ok"] = btc_move_ok
+        if not btc_move_ok:
+            conds["block_reason"] = "momentum_insufficient"
             await self._log_blocked(
                 "momentum_insufficient",
                 move=round(abs(btc_change), 2),
@@ -290,16 +323,19 @@ class Scalper:
             )
             return None
 
-        # Entry price must be in the confirmed-winner range (buy low, sell high)
-        if not (self.cfg.min_entry_price_cents <= entry_price <= self.cfg.max_entry_price_cents):
+        # ── Price range gate ──────────────────────────────────────────────────
+        if not conds["price_in_range"]:
+            conds["block_reason"] = "entry_price_out_of_range"
             await self._log_blocked("entry_price_out_of_range", price=round(entry_price, 1))
             return None
 
-        # GBM model must broadly agree with BTC direction
+        # ── GBM model gate ────────────────────────────────────────────────────
         if side == "yes" and fv <= 50.0:
+            conds["block_reason"] = "model_disagrees"
             await self._log_blocked("model_disagrees", side="yes", fv=round(fv, 1))
             return None
         if side == "no" and fv >= 50.0:
+            conds["block_reason"] = "model_disagrees"
             await self._log_blocked("model_disagrees", side="no", fv=round(fv, 1))
             return None
 
@@ -318,9 +354,12 @@ class Scalper:
         confidence = move_score * 0.7 + depth_score * 0.3
 
         if confidence < self.cfg.confidence_threshold:
+            conds["block_reason"] = "confidence_below_threshold"
             await self._log_blocked("confidence_below_threshold", conf=round(confidence, 3), threshold=self.cfg.confidence_threshold)
             return None
 
+        # ── All gates passed — signal ready ───────────────────────────────────
+        conds["ready"] = True
         self._last_signal_ts = now
         gap_pct = abs(fv - mid) / 100.0
         sig = Signal(

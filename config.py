@@ -88,10 +88,10 @@ class Settings(BaseSettings):
     # BTC move (USD) over 30s that triggers a 30s signal pause
     momentum_threshold_usd: float = Field(default=150.0, env="MOMENTUM_THRESHOLD_USD")
 
-    # ── Pre-window technical analysis (Binance, no auth required) ────────────
-    # Symbol and candle interval used to fetch indicators before each window
-    binance_symbol: str = Field(default="BTCUSDT", env="BINANCE_SYMBOL")
-    binance_klines_interval: str = Field(default="1m", env="BINANCE_KLINES_INTERVAL")
+    # ── Pre-window technical analysis (Coinbase Exchange, no auth required) ─────
+    # Product ID and candle granularity (seconds) for RSI/ADX/BB fetch
+    binance_symbol: str = Field(default="BTC-USD", env="BINANCE_SYMBOL")
+    binance_klines_interval: str = Field(default="60", env="BINANCE_KLINES_INTERVAL")
     # Block entries when pre-window bias contradicts the trade direction
     # Set to False to use technicals as display-only without gating trades
     bias_gate_enabled: bool = Field(default=True, env="BIAS_GATE_ENABLED")

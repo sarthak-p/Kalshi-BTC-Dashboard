@@ -142,15 +142,33 @@ class StateManager:
         self.session_fees_usd: float = 0.0
         self.daily_loss: float = 0.0
 
-        # Pre-window technical bias (fetched from Binance, updated ~every 60s)
+        # Pre-window technical bias (fetched from Coinbase Exchange, updated ~every 60s)
         self.pre_window_bias: str = "neutral"   # "up" | "down" | "neutral"
         self.tech_rsi: float = 50.0
         self.tech_adx: float = 25.0
         self.tech_bb_position: float = 0.5
         self.tech_bb_width: float = 0.0
+        self.tech_fetched: bool = False         # False until first successful Coinbase fetch
 
         # One-and-done: set True after the first winning trade in a window
         self.window_won: bool = False
+
+        # Live signal conditions — updated every evaluation cycle by the scalper.
+        # Written directly (no lock) since the scalper is the sole writer in asyncio.
+        self.live_conditions: dict = {
+            "phase": "waiting",       # waiting|monitoring|entry_open|no_more_entries|force_exit
+            "side": None,             # "yes" | "no" | None
+            "btc_move_ok": False,
+            "price_in_range": False,
+            "entry_price": None,
+            "line_crossings": None,   # int or None (not yet computed)
+            "crossings_ok": None,
+            "direction_score": None,  # 0.0–1.0, or None if check was skipped
+            "direction_ok": None,
+            "bias_ok": None,
+            "block_reason": None,     # last block reason string, or None
+            "ready": False,
+        }
 
         # Prediction (updated every tick from scalper)
         self.prediction_yes_pct: float = 50.0   # GBM probability YES wins (0–100)
@@ -272,6 +290,7 @@ class StateManager:
             self.tech_bb_position = bb_position
             self.tech_bb_width = bb_width
             self.pre_window_bias = bias
+            self.tech_fetched = True
         self._dirty.set()
 
     async def update_prediction(self, yes_pct: float, predicted_close: float = 0.0) -> None:
@@ -412,11 +431,14 @@ class StateManager:
             # Pre-window technicals
             "pre_window_bias": self.pre_window_bias,
             "window_won": self.window_won,
+            # Live signal conditions (shallow copy — dict is small)
+            "live_conditions": dict(self.live_conditions),
             "technicals": {
                 "rsi": self.tech_rsi,
                 "adx": self.tech_adx,
                 "bb_position": self.tech_bb_position,
                 "bb_width": self.tech_bb_width,
+                "fetched": self.tech_fetched,
             },
             # Prediction
             "prediction_yes_pct": self.prediction_yes_pct,

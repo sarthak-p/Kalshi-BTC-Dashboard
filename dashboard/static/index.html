@@ -213,6 +213,14 @@ body {
 .fv-val { font-size: 13px; font-weight: 600; }
 #gap-val { font-weight: 700; }
 
+/* ── Signal conditions table ─────────────────────────────────────────── */
+.sc-row { border-bottom: 1px solid var(--border); }
+.sc-row:last-child { border-bottom: none; }
+.sc-icon { width: 18px; text-align: center; font-size: 14px; padding: 5px 0; }
+.sc-label { color: var(--muted); font-size: 11px; padding: 5px 6px 5px 0; }
+.sc-value { font-weight: 700; font-size: 13px; padding: 5px 8px 5px 0; min-width: 60px; }
+.sc-hint  { font-size: 10px; text-align: right; }
+
 /* ── Signal feed ──────────────────────────────────────────────────────── */
 #signal-list {
   max-height: 220px;
@@ -329,8 +337,8 @@ tr:last-child td { border-bottom: none; }
     <span class="dot-label">KALSHI</span>
   </div>
   <span id="mode-badge" style="padding:4px 10px;border:1px solid var(--border);border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">PAPER</span>
-  <span style="padding:4px 10px;border:1px solid var(--yellow);color:var(--yellow);border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">MOMENTUM</span>
   <span id="velocity-badge" style="display:none;padding:4px 10px;background:var(--yellow);color:#000;border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">⚡ VELOCITY PAUSE</span>
+  <span id="won-badge" style="display:none;padding:4px 10px;background:var(--green);color:#000;border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">✓ WINDOW WON</span>
   <span id="session-uptime" style="color:var(--muted);font-size:10px;white-space:nowrap">UP 0s</span>
   <button id="kill-btn" onclick="sendKill()">KILL SWITCH</button>
 </div>
@@ -359,6 +367,128 @@ tr:last-child td { border-bottom: none; }
     <div class="metric-card">
       <div class="metric-label">Open Positions</div>
       <div class="metric-value" id="m-positions">0</div>
+    </div>
+  </div>
+
+  <!-- Market conditions bar -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Market Conditions</span>
+      <span id="cond-updated" style="color:var(--muted);font-size:10px">Coinbase — waiting…</span>
+    </div>
+    <div class="panel-body" style="padding:10px 14px">
+      <div style="display:flex;align-items:flex-start;gap:28px;flex-wrap:wrap">
+
+        <!-- Pre-window bias -->
+        <div>
+          <div class="metric-label" style="margin-bottom:4px">Pre-Window Bias</div>
+          <div id="bias-val" style="font-size:18px;font-weight:700;letter-spacing:1px">—</div>
+        </div>
+
+        <!-- RSI -->
+        <div style="min-width:140px">
+          <div class="metric-label" style="margin-bottom:4px">RSI(14)</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="rsi-val" style="font-weight:700;min-width:34px;font-size:15px">—</span>
+            <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:60px">
+              <div id="rsi-bar" style="height:100%;width:50%;background:var(--muted);border-radius:3px;transition:width .6s,background .3s"></div>
+            </div>
+          </div>
+          <div id="rsi-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
+        </div>
+
+        <!-- ADX -->
+        <div>
+          <div class="metric-label" style="margin-bottom:4px">ADX(14)</div>
+          <div id="adx-val" style="font-size:15px;font-weight:700">—</div>
+          <div id="adx-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
+        </div>
+
+        <!-- Bollinger Band position -->
+        <div style="min-width:140px">
+          <div class="metric-label" style="margin-bottom:4px">BB(20) Position</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="bb-val" style="font-weight:700;min-width:34px;font-size:15px">—</span>
+            <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:60px;position:relative">
+              <!-- Lower zone (bullish) -->
+              <div style="position:absolute;left:0;top:0;width:40%;height:100%;background:rgba(16,185,129,.15)"></div>
+              <!-- Upper zone (bearish) -->
+              <div style="position:absolute;right:0;top:0;width:40%;height:100%;background:rgba(239,68,68,.15)"></div>
+              <div id="bb-bar" style="position:absolute;top:0;height:100%;width:4px;background:var(--text);border-radius:2px;transition:left .6s"></div>
+            </div>
+          </div>
+          <div id="bb-label" style="font-size:9px;color:var(--muted);margin-top:2px">lower ◀──────────── ▶ upper</div>
+        </div>
+
+        <!-- Momentum / velocity -->
+        <div>
+          <div class="metric-label" style="margin-bottom:4px">BTC Momentum</div>
+          <div id="mom-val" style="font-size:15px;font-weight:700">—</div>
+        </div>
+
+        <!-- Window phase -->
+        <div>
+          <div class="metric-label" style="margin-bottom:4px">Window Phase</div>
+          <div id="phase-val" style="font-size:15px;font-weight:700">—</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Signal Conditions panel -->
+  <div class="panel" id="signal-conditions-panel">
+    <div class="panel-header">
+      <span>Signal Conditions</span>
+      <span id="sc-side-badge" style="font-size:11px;font-weight:700;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--surface)">—</span>
+    </div>
+    <div class="panel-body" style="padding:10px 14px">
+
+      <!-- Phase + status row -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div>
+          <span style="color:var(--muted);font-size:9px;letter-spacing:1px;text-transform:uppercase">Phase</span>
+          <span id="sc-phase" style="margin-left:8px;font-weight:700;font-size:13px">—</span>
+        </div>
+        <div id="sc-status" style="font-size:12px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:4px;background:var(--surface)">—</div>
+      </div>
+
+      <!-- Gate rows -->
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tbody>
+          <tr class="sc-row" id="sc-row-momentum">
+            <td class="sc-icon" id="sc-icon-momentum">·</td>
+            <td class="sc-label">BTC move from open</td>
+            <td class="sc-value" id="sc-val-momentum">—</td>
+            <td class="sc-hint" id="sc-hint-momentum" style="color:var(--muted)">need $30</td>
+          </tr>
+          <tr class="sc-row" id="sc-row-price">
+            <td class="sc-icon" id="sc-icon-price">·</td>
+            <td class="sc-label">Entry price</td>
+            <td class="sc-value" id="sc-val-price">—</td>
+            <td class="sc-hint" style="color:var(--muted)">60–85¢ range</td>
+          </tr>
+          <tr class="sc-row" id="sc-row-crossings">
+            <td class="sc-icon" id="sc-icon-crossings">·</td>
+            <td class="sc-label">50¢ line crossings</td>
+            <td class="sc-value" id="sc-val-crossings">—</td>
+            <td class="sc-hint" style="color:var(--muted)">max 2</td>
+          </tr>
+          <tr class="sc-row" id="sc-row-direction">
+            <td class="sc-icon" id="sc-icon-direction">·</td>
+            <td class="sc-label">Direction score</td>
+            <td class="sc-value" id="sc-val-direction">—</td>
+            <td class="sc-hint" style="color:var(--muted)">need 60%</td>
+          </tr>
+          <tr class="sc-row" id="sc-row-bias">
+            <td class="sc-icon" id="sc-icon-bias">·</td>
+            <td class="sc-label">Pre-window bias</td>
+            <td class="sc-value" id="sc-val-bias">—</td>
+            <td class="sc-hint" id="sc-hint-bias" style="color:var(--muted)">no conflict</td>
+          </tr>
+        </tbody>
+      </table>
+
     </div>
   </div>
 
@@ -477,10 +607,213 @@ function render(s) {
   lastState = s;
   renderTopBar(s);
   renderMetrics(s);
+  renderMarketConditions(s);
+  renderSignalConditions(s);
   renderBtc(s);
   renderSignals(s);
   renderPositions(s);
   renderEventLog(s);
+}
+
+// ── Market conditions ──────────────────────────────────────────────────────
+function renderMarketConditions(s) {
+  const tech = s.technicals || {};
+
+  // Pre-window bias
+  const bias = s.pre_window_bias || 'neutral';
+  const biasEl = document.getElementById('bias-val');
+  biasEl.textContent = bias.toUpperCase();
+  biasEl.style.color = bias === 'up' ? 'var(--green)' : bias === 'down' ? 'var(--red)' : 'var(--yellow)';
+
+  // RSI
+  if (tech.rsi != null) {
+    const rsi = tech.rsi;
+    const rsiEl = document.getElementById('rsi-val');
+    rsiEl.textContent = rsi.toFixed(1);
+    rsiEl.style.color = rsi < 30 ? 'var(--green)' : rsi < 40 ? 'rgba(16,185,129,.6)' : rsi > 70 ? 'var(--red)' : rsi > 60 ? 'rgba(239,68,68,.6)' : 'var(--text)';
+    document.getElementById('rsi-bar').style.width = rsi + '%';
+    document.getElementById('rsi-bar').style.background = rsi < 40 ? 'var(--green)' : rsi > 60 ? 'var(--red)' : 'var(--muted)';
+    document.getElementById('rsi-label').textContent = rsi < 30 ? 'OVERSOLD' : rsi < 40 ? 'leaning oversold' : rsi > 70 ? 'OVERBOUGHT' : rsi > 60 ? 'leaning overbought' : 'neutral';
+    if (tech.fetched) document.getElementById('cond-updated').textContent = 'Coinbase — ' + new Date().toLocaleTimeString('en-US', { hour12: false });
+  }
+
+  // ADX
+  if (tech.adx != null) {
+    const adx = tech.adx;
+    const adxEl = document.getElementById('adx-val');
+    adxEl.textContent = adx.toFixed(1);
+    adxEl.style.color = adx > 30 ? 'var(--green)' : adx < 20 ? 'var(--yellow)' : 'var(--text)';
+    document.getElementById('adx-label').textContent = adx > 30 ? 'trending' : adx < 20 ? 'choppy (ideal)' : 'moderate';
+  }
+
+  // BB position — slider dot
+  if (tech.bb_position != null) {
+    const pos = tech.bb_position;
+    const bbEl = document.getElementById('bb-val');
+    bbEl.textContent = (pos * 100).toFixed(0) + '%';
+    bbEl.style.color = pos < 0.4 ? 'var(--green)' : pos > 0.6 ? 'var(--red)' : 'var(--text)';
+    // position the dot: we want left% inside the track (subtract half dot width ~2px → handled by offsetting)
+    document.getElementById('bb-bar').style.left = 'calc(' + (pos * 100) + '% - 2px)';
+    document.getElementById('bb-bar').style.background = pos < 0.4 ? 'var(--green)' : pos > 0.6 ? 'var(--red)' : 'var(--text)';
+  }
+
+  // BTC momentum / velocity
+  const momEl = document.getElementById('mom-val');
+  if (s.velocity_pause) {
+    momEl.textContent = '⚡ PAUSED';
+    momEl.style.color = 'var(--yellow)';
+  } else {
+    const mom = s.momentum_direction || 'neutral';
+    momEl.textContent = mom === 'up' ? '▲ UP' : mom === 'down' ? '▼ DOWN' : 'CALM';
+    momEl.style.color = mom === 'up' ? 'var(--green)' : mom === 'down' ? 'var(--red)' : 'var(--muted)';
+  }
+
+  // Window phase
+  const left = s.window_seconds_left || 0;
+  const phaseEl = document.getElementById('phase-val');
+  if (!s.active_contract) {
+    phaseEl.textContent = 'NO CONTRACT';
+    phaseEl.style.color = 'var(--muted)';
+  } else if (left > 480) {
+    phaseEl.textContent = 'MONITORING';
+    phaseEl.style.color = 'var(--muted)';
+  } else if (left > 120) {
+    phaseEl.textContent = 'ENTRY OPEN';
+    phaseEl.style.color = 'var(--green)';
+  } else if (left > 90) {
+    phaseEl.textContent = 'LAST ENTRIES';
+    phaseEl.style.color = 'var(--yellow)';
+  } else {
+    phaseEl.textContent = 'FORCE EXIT';
+    phaseEl.style.color = 'var(--red)';
+  }
+}
+
+// ── Signal conditions panel ────────────────────────────────────────────────
+function renderSignalConditions(s) {
+  const conds = s.live_conditions || {};
+  const tau   = s.window_seconds_left || 0;
+  const btcChange = s.btc_change || 0;
+  const ob    = s.orderbook || {};
+  const bias  = s.pre_window_bias || 'neutral';
+
+  // ── Phase label ────────────────────────────────────────────────────────
+  const phaseMap = {
+    waiting:          { label: 'WAITING',          color: 'var(--muted)'   },
+    monitoring:       { label: 'MONITORING',        color: 'var(--yellow)'  },
+    entry_open:       { label: 'ENTRY OPEN',        color: 'var(--green)'   },
+    no_more_entries:  { label: 'NO MORE ENTRIES',   color: 'var(--muted)'   },
+    force_exit:       { label: 'FORCE EXIT',        color: 'var(--red)'     },
+  };
+  const ph = phaseMap[conds.phase] || { label: '—', color: 'var(--muted)' };
+  const phEl = document.getElementById('sc-phase');
+  phEl.textContent = ph.label;
+  phEl.style.color = ph.color;
+
+  // ── Side badge ─────────────────────────────────────────────────────────
+  const sideEl = document.getElementById('sc-side-badge');
+  const side = conds.side;
+  if (side === 'yes') {
+    sideEl.textContent = 'LEANING  YES ▲';
+    sideEl.style.color = 'var(--green)';
+  } else if (side === 'no') {
+    sideEl.textContent = 'LEANING  NO ▼';
+    sideEl.style.color = 'var(--red)';
+  } else {
+    sideEl.textContent = '—';
+    sideEl.style.color = 'var(--muted)';
+  }
+
+  // ── Helper: set one gate row ────────────────────────────────────────────
+  function setRow(key, ok, valueText, hintOverride) {
+    const icon = document.getElementById('sc-icon-' + key);
+    const val  = document.getElementById('sc-val-'  + key);
+    const hint = document.getElementById('sc-hint-' + key);
+    if (!icon) return;
+    if (ok === true) {
+      icon.textContent = '✓'; icon.style.color = 'var(--green)';
+      val.style.color  = 'var(--green)';
+    } else if (ok === false) {
+      icon.textContent = '✗'; icon.style.color = 'var(--red)';
+      val.style.color  = 'var(--red)';
+    } else {
+      // null = not yet evaluated
+      icon.textContent = '·'; icon.style.color = 'var(--muted)';
+      val.style.color  = 'var(--text)';
+    }
+    if (valueText !== undefined) val.textContent = valueText;
+    if (hintOverride && hint) hint.textContent = hintOverride;
+  }
+
+  // ── BTC momentum ───────────────────────────────────────────────────────
+  const absMov = Math.abs(btcChange);
+  const movOk  = conds.btc_move_ok;
+  const movTxt = (btcChange >= 0 ? '+' : '') + '$' + btcChange.toFixed(0);
+  setRow('momentum', movOk === true ? true : movOk === false ? false : null, movTxt,
+         'need $' + (s.momentum_entry_usd || 30));
+
+  // ── Entry price ────────────────────────────────────────────────────────
+  const epTxt = conds.entry_price != null ? conds.entry_price.toFixed(1) + '¢' : '—';
+  setRow('price', conds.price_in_range === true ? true : conds.price_in_range === false ? false : null, epTxt);
+
+  // ── Line crossings ─────────────────────────────────────────────────────
+  const xTxt = conds.line_crossings != null ? String(conds.line_crossings) : '—';
+  setRow('crossings', conds.crossings_ok === true ? true : conds.crossings_ok === false ? false : null, xTxt);
+
+  // ── Direction score ────────────────────────────────────────────────────
+  let dirTxt = '—', dirOk = null;
+  if (conds.direction_score != null) {
+    dirTxt = Math.round(conds.direction_score * 100) + '%';
+    dirOk  = conds.direction_ok;
+  } else if (conds.direction_ok === true) {
+    // Price deeply committed — check was skipped
+    dirTxt = 'SKIPPED';
+    dirOk  = true;
+  }
+  setRow('direction', dirOk, dirTxt);
+
+  // ── Bias ───────────────────────────────────────────────────────────────
+  const biasTxt   = bias.toUpperCase();
+  const biasOk    = conds.bias_ok;
+  const biasHint  = biasOk === false ? `${bias} conflicts` : 'no conflict';
+  setRow('bias', biasOk === true ? true : biasOk === false ? false : null, biasTxt, biasHint);
+
+  // ── Overall status banner ──────────────────────────────────────────────
+  const statusEl = document.getElementById('sc-status');
+  if (conds.ready) {
+    statusEl.textContent = '▶  SIGNAL READY — ' + (side === 'yes' ? 'BUY YES' : 'BUY NO');
+    statusEl.style.background = 'rgba(16,185,129,.2)';
+    statusEl.style.color = 'var(--green)';
+  } else if (conds.block_reason) {
+    const reasons = {
+      momentum_insufficient:    'BTC has not moved enough yet',
+      entry_price_out_of_range: 'Price outside 60–85¢ entry zone',
+      price_too_choppy:         'Too many line crossings — market undecided',
+      direction_inconsistent:   'Price not holding direction — wait',
+      market_too_erratic:       'Market swinging too fast — wait',
+      bias_disagrees:           'Pre-window technicals conflict',
+      model_disagrees:          'GBM model disagrees with direction',
+      confidence_below_threshold: 'Signal confidence too low',
+      thin_market:              'Thin market — low open interest',
+    };
+    const msg = reasons[conds.block_reason] || conds.block_reason;
+    statusEl.textContent = '✗  BLOCKED: ' + msg;
+    statusEl.style.background = 'rgba(239,68,68,.15)';
+    statusEl.style.color = 'var(--red)';
+  } else if (conds.phase === 'monitoring') {
+    const minsLeft = Math.ceil((tau - (s.max_entry_window_s || 480)) / 60);
+    statusEl.textContent = '⟳  MONITORING — watching first ' + Math.ceil(minsLeft) + ' min';
+    statusEl.style.background = 'rgba(234,179,8,.1)';
+    statusEl.style.color = 'var(--yellow)';
+  } else if (conds.phase === 'force_exit') {
+    statusEl.textContent = '⚠  FORCE EXIT — closing all positions';
+    statusEl.style.background = 'rgba(239,68,68,.2)';
+    statusEl.style.color = 'var(--red)';
+  } else {
+    statusEl.textContent = '— waiting for data';
+    statusEl.style.background = 'var(--surface)';
+    statusEl.style.color = 'var(--muted)';
+  }
 }
 
 // ── Top bar ────────────────────────────────────────────────────────────────
@@ -506,6 +839,7 @@ function renderTopBar(s) {
   modeBadge.style.color = mode === 'LIVE' ? 'var(--red)' : 'var(--muted)';
 
   document.getElementById('velocity-badge').style.display = s.velocity_pause ? 'inline-block' : 'none';
+  document.getElementById('won-badge').style.display = s.window_won ? 'inline-block' : 'none';
 
   if (s.session_start_ts) {
     const elapsed = Date.now() / 1000 - s.session_start_ts;
@@ -784,6 +1118,7 @@ setInterval(() => {
   if (!lastState.window_close_ts) return;
   lastState.window_seconds_left = Math.max(0, lastState.window_close_ts - Date.now() / 1000);
   renderWindowProgress(lastState);
+  renderMarketConditions(lastState);
   if (lastState.open_positions) renderPositions(lastState);
 }, 500);
 

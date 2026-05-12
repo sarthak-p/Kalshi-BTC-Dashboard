@@ -1,5 +1,5 @@
 """
-Pre-window BTC technical analysis using Binance 1-min OHLCV candles (no auth required).
+Pre-window BTC technical analysis using Coinbase Exchange 1-min OHLCV candles (no auth required).
 
 Fetches the last 50 candles and computes RSI(14), ADX(14), and Bollinger Bands(20)
 to generate a directional bias before each Kalshi 15-min window.
@@ -13,13 +13,18 @@ Bias logic (mirrors manual strategy from the video):
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional
 
 import httpx
 
-_BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+# Coinbase Exchange public candle API (no auth, US-accessible)
+# Format: [time, low, high, open, close, volume]  — newest candle first
+_COINBASE_CANDLES = "https://api.exchange.coinbase.com/products/{symbol}/candles"
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,27 +37,32 @@ class TechnicalBias:
 
 
 async def fetch_bias(
-    symbol: str = "BTCUSDT",
-    interval: str = "1m",
+    symbol: str = "BTC-USD",
+    interval: str = "60",   # granularity in seconds (str for config compat)
     limit: int = 50,
 ) -> Optional[TechnicalBias]:
-    """Fetch Binance klines and compute directional bias. Returns None on any error."""
+    """Fetch Coinbase Exchange candles and compute directional bias. Returns None on any error."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
-                _BINANCE_KLINES,
-                params={"symbol": symbol, "interval": interval, "limit": limit},
+                _COINBASE_CANDLES.format(symbol=symbol),
+                params={"granularity": int(interval)},
             )
             resp.raise_for_status()
             candles = resp.json()
-    except Exception:
+    except Exception as exc:
+        _log.warning("fetch_bias: Coinbase candle fetch failed — %s: %s", type(exc).__name__, exc)
         return None
+
+    # Coinbase returns newest-first; reverse to get chronological order, then take last `limit`
+    candles = list(reversed(candles))[-limit:]
 
     if len(candles) < 30:
         return None
 
+    # Coinbase candle format: [time, low, high, open, close, volume]
     highs  = [float(c[2]) for c in candles]
-    lows   = [float(c[3]) for c in candles]
+    lows   = [float(c[1]) for c in candles]
     closes = [float(c[4]) for c in candles]
 
     rsi             = _rsi(closes)
@@ -74,9 +84,11 @@ async def fetch_bias(
 def _classify(rsi: float, bb_pos: float) -> str:
     bull = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
     bear = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
-    if bull > bear:
+    # Require 2 signals to set a directional bias — one marginal indicator alone
+    # (e.g. BB barely above 0.6 with neutral RSI) is not enough to block a trade.
+    if bull >= 2 and bull > bear:
         return "up"
-    if bear > bull:
+    if bear >= 2 and bear > bull:
         return "down"
     return "neutral"
 
