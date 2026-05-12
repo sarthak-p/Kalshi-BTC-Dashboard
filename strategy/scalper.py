@@ -176,14 +176,19 @@ class Scalper:
         yes_ask = ob.best_ask() or 0.0
         no_ask = (100.0 - ob.best_bid()) if ob.best_bid() is not None else 0.0
         entry_price = yes_ask if side == "yes" else no_ask
-        if not (self.cfg.min_entry_price_cents <= entry_price <= self.cfg.max_entry_price_cents):
+
+        # Compute is_fade before price check — fade entries bypass the minimum
+        # price floor (NO costs only 15-30¢ when YES has spiked to 72¢+, which
+        # is precisely when the fade trade has the best risk/reward).
+        is_fade = (side == "no" and yes_ask >= self.cfg.fade_extreme_cents) or \
+                  (side == "yes" and yes_ask <= (100.0 - self.cfg.fade_extreme_cents))
+
+        min_price = 0.0 if is_fade else self.cfg.min_entry_price_cents
+        if not (min_price <= entry_price <= self.cfg.max_entry_price_cents):
             return None
 
         # Signal debounce
         if now - self._last_signal_ts < self.cfg.signal_debounce_s:
-            return None
-        # Post-entry cooldown: 30 s after any position opens
-        if now - self.state.last_position_open_ts <= 30.0:
             return None
 
         # ── One position per direction per contract — no martingaling ─────────
@@ -194,8 +199,6 @@ class Scalper:
         # ── Directional drift guard ───────────────────────────────────────────
         # Block chasing an adverse move (YES when BTC already fell, NO when already rose).
         # Do NOT block fading an extreme price — that's the other side of the same coin.
-        is_fade = (side == "no" and yes_ask >= self.cfg.fade_extreme_cents) or \
-                  (side == "yes" and yes_ask <= (100.0 - self.cfg.fade_extreme_cents))
         if not is_fade and btc_open > 0 and self.cfg.max_adverse_drift_pct > 0:
             drift = (btc - btc_open) / btc_open
             if side == "yes" and drift < -self.cfg.max_adverse_drift_pct:

@@ -124,7 +124,6 @@ class StateManager:
         self.momentum_direction: str = "neutral"  # "up" | "down" | "neutral"
         self.velocity_pause: bool = False
         self.velocity_pause_until: float = 0.0
-        self.last_position_open_ts: float = 0.0
 
         # Orderbook
         self.orderbook: Orderbook = Orderbook()
@@ -255,7 +254,11 @@ class StateManager:
         async with self._lock:
             self.open_positions.append(pos)
             self.balance -= pos.cost_usd
-            self.last_position_open_ts = time.time()
+        self._dirty.set()
+
+    async def update_open_interest(self, oi: float) -> None:
+        async with self._lock:
+            self.open_interest = oi
         self._dirty.set()
 
     async def set_balance(self, balance_usd: float) -> None:

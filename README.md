@@ -1,15 +1,14 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Real-time **mispricing arbitrage** bot for Kalshi BTC 15-minute binary markets,
+Real-time **latency arbitrage** bot for Kalshi BTC 15-minute binary markets,
 with paper and live execution modes plus a FastAPI dashboard.
 
 ## How it works
 
 Kalshi's `KXBTC15M` contract is a binary: it pays $1 if BTC closes at or above
 the price it opened the 15-minute window at, $0 otherwise. The bot's edge is
-that Kalshi's orderbook is sometimes slow to reprice after BTC makes a big move
-early in the window. The bot watches for that lag and bets on the side that
-Kalshi's market is undervaluing.
+that Kalshi's orderbook is slow to reprice after BTC makes a move on Coinbase.
+The bot watches for that lag and buys the underpriced side before Kalshi catches up.
 
 **Every 50 ms it asks:** given where BTC is right now relative to the window
 open price, what *should* the YES contract be worth?
@@ -24,17 +23,28 @@ using a sum-of-squared log returns estimator, clamped to `[0.20, 2.50]`. The
 `BTC_SIGMA` config value is only used as a fallback until enough history
 accumulates.
 
-If `|fair_value − kalshi_mid| > 7¢` (the default threshold), and the contract
+If `|fair_value − kalshi_mid| ≥ 12¢` (the default threshold), and the contract
 isn't mispriced in a direction that contradicts BTC momentum, it fires a signal.
+
+**Why cheap contracts (8–40¢)?** Buying at 20¢ when fair value is 35¢ requires
+only a ~23% win rate to be profitable after fees. Buying at 70¢ when fair value
+is 80¢ requires ~80% win rate. The binary payout structure ($1 or $0) makes low-
+cost entries far more capital-efficient — a win pays back 4–10× your stake.
 
 **Entry window:** the bot enters any time in the first ~11 minutes of a
 15-minute window. It blocks entries when fewer than 4 minutes remain
 (`MIN_ENTRY_WINDOW_S=240`) because by then the market has already converged and
-the edge is gone.
+the structural lag is gone.
 
-**Exit:** take profit when position value rises 15% above entry (`TAKE_PROFIT_PCT`),
-stop loss when position value drops to 45% of entry (`STOP_LOSS_PCT`), hard
-time-stop at 2 minutes remaining if the position is in loss.
+**Exit (hybrid):**
+- Take profit when position value rises **+20¢ above entry** (`TAKE_PROFIT_CENTS`)
+- Stop loss when position value falls **−10¢ below entry** (`STOP_LOSS_CENTS`)
+- Time-stop: exit any losing position when ≤ 2 minutes remain
+- Winning positions that haven't hit the TP target ride to settlement at 100¢
+
+Multiple entries per window are allowed — after a take-profit or stop, the bot
+re-enters immediately if a new 12¢+ gap appears. Up to 5 positions may be held
+concurrently.
 
 The bot listens to live Kalshi market data and a Coinbase BTC/USD reference
 feed, runs the model continuously, and either paper-trades or submits real
@@ -144,7 +154,7 @@ Interpretation:
 
 - `fair_value_yes > kalshi_mid` → YES looks underpriced, bot considers buying YES.
 - `fair_value_yes < kalshi_mid` → NO looks underpriced, bot considers buying NO.
-- A signal fires only when the gap exceeds `SIGNAL_THRESHOLD`.
+- A signal fires only when the gap exceeds `SIGNAL_THRESHOLD` (default: 12¢).
 
 Additional filters before a signal is emitted:
 
@@ -155,12 +165,12 @@ Additional filters before a signal is emitted:
 - **Directional drift guard:** blocks entries after BTC has already moved
   significantly against the position's direction.
 - **Entry price range:** only enters when the contract side costs between
-  `MIN_ENTRY_PRICE_CENTS` and `MAX_ENTRY_PRICE_CENTS`.
+  `MIN_ENTRY_PRICE_CENTS` and `MAX_ENTRY_PRICE_CENTS` (default 8–40¢).
 - **Thin-market filter:** skips signals when open interest is below
   `MIN_OPEN_INTEREST`.
 - **New-window settle:** blocks all signals for `NEW_WINDOW_SETTLE_S` after a
   new market is discovered, giving feeds time to stabilise.
-- **Signal debounce + post-entry cooldown:** prevents rapid-fire entries.
+- **Signal debounce:** prevents duplicate signals within `SIGNAL_DEBOUNCE_S`.
 - **Confidence threshold:** requires `gap_score * 0.7 + depth_score * 0.3` to
   exceed `CONFIDENCE_THRESHOLD`.
 
@@ -176,10 +186,11 @@ Positions are simulated using Kalshi binary contract economics:
 
 Exit logic:
 
-- **Take profit:** close when position value rises `TAKE_PROFIT_PCT` above entry.
-- **Stop loss:** close when position value drops to `STOP_LOSS_PCT` of entry.
+- **Take profit:** close when position value rises `TAKE_PROFIT_CENTS` above entry.
+- **Stop loss:** close when position value falls `STOP_LOSS_CENTS` below entry.
 - **Time stop:** close losing positions when ≤ 2 minutes remain.
-- **Settlement:** remaining positions close at 0 or 100 when the window expires.
+- **Settlement:** winning positions that haven't been closed ride to settlement
+  at 100¢ or 0¢ when the window expires.
 
 ## Live Trading Behavior
 
@@ -205,7 +216,7 @@ LIVE_TRADING_ACK=I_UNDERSTAND_THIS_PLACES_REAL_ORDERS
 LIVE_UNIT_SIZE=5
 LIVE_MAX_ORDER_COST_USD=5.00
 LIVE_ALLOW_EXISTING_POSITIONS=false
-DAILY_LOSS_LIMIT_USD=5.0
+DAILY_LOSS_LIMIT_USD=10.0
 ```
 
 The config validator refuses live mode unless:
@@ -269,21 +280,21 @@ logs/                      runtime CSV logs; lifetime_stats.json (win rate)
 | `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract discovery |
 | `COINBASE_WS_URL` | Coinbase WS | BTC-USD reference feed URL |
 | `BTC_SIGMA` | `0.80` | Fallback annualized BTC vol (used until rolling vol is ready) |
-| `SIGNAL_THRESHOLD` | `0.07` | Minimum fair-value gap fraction to fire a signal |
-| `CONFIDENCE_THRESHOLD` | `0.55` | Minimum confidence score to act |
-| `SIGNAL_DEBOUNCE_S` | `10.0` | Minimum seconds between generated signals |
+| `SIGNAL_THRESHOLD` | `0.12` | Min fair-value gap fraction to fire a signal (0.12 = 12¢) |
+| `CONFIDENCE_THRESHOLD` | `0.50` | Minimum confidence score to act |
+| `SIGNAL_DEBOUNCE_S` | `5.0` | Minimum seconds between generated signals |
 | `MIN_ENTRY_WINDOW_S` | `240.0` | Block entries when < this many seconds remain in window |
-| `MIN_ENTRY_PRICE_CENTS` | `30.0` | Minimum contract ask price to enter |
-| `MAX_ENTRY_PRICE_CENTS` | `65.0` | Maximum contract ask price to enter |
-| `TAKE_PROFIT_PCT` | `0.15` | Exit when position value rises this fraction above entry |
-| `STOP_LOSS_PCT` | `0.45` | Exit when position value drops to this fraction of entry |
+| `MIN_ENTRY_PRICE_CENTS` | `8.0` | Minimum contract ask price to enter |
+| `MAX_ENTRY_PRICE_CENTS` | `40.0` | Maximum contract ask price to enter (cheap entries only) |
+| `TAKE_PROFIT_CENTS` | `20.0` | Exit when position value rises this many cents above entry |
+| `STOP_LOSS_CENTS` | `10.0` | Exit when position value falls this many cents below entry |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC USD move over 30s to declare a momentum trend |
 | `MAX_ADVERSE_DRIFT_PCT` | `0.002` | Max adverse BTC drift before blocking entries |
 | `FADE_EXTREME_CENTS` | `72.0` | YES ask threshold above which spike-fade mode activates |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Block signals after new contract discovery |
 | `MIN_OPEN_INTEREST` | `500` | Minimum open interest to allow signals |
-| `MAX_CONCURRENT_POSITIONS` | `3` | Maximum open positions at once |
-| `DAILY_LOSS_LIMIT_USD` | `5.0` | Session loss limit before kill switch |
+| `MAX_CONCURRENT_POSITIONS` | `5` | Maximum open positions at once |
+| `DAILY_LOSS_LIMIT_USD` | `10.0` | Session loss limit before kill switch |
 | `STARTING_BALANCE` | `1000.0` | Starting paper balance |
 | `TRADING_MODE` | `paper` | `paper` or `live` |
 | `LIVE_TRADING_ACK` | empty | Required ack string for live mode |
@@ -312,3 +323,6 @@ sessions.
 - No historical backtest runner.
 - Contract discovery depends on `BTC_SERIES_TICKER` matching the current Kalshi
   market naming convention.
+- The 7% Kalshi taker fee is significant — each round trip costs ~14% of notional.
+  The strategy is designed around this: cheap entries (8–40¢) give large payouts
+  relative to cost, keeping the break-even win rate low (~23–35%).

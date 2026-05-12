@@ -240,6 +240,11 @@ class KalshiFeed:
         # yes_bid_dollars / yes_ask_dollars are dollar-denominated strings
         bid_str = data.get("yes_bid_dollars")
         ask_str = data.get("yes_ask_dollars")
+        oi_str = data.get("open_interest_fp")
+
+        if oi_str is not None:
+            await self.state.update_open_interest(float(oi_str))
+
         if not bid_str and not ask_str:   # only skip if BOTH are missing
             return
         ob = deepcopy(self._ob)

@@ -210,7 +210,7 @@ class LiveTrader:
             entry_time=time.time(),
             cost_usd=round(cost_usd, 4),
             current_price=fill_price,
-            stop_price=round(fill_price * self.cfg.stop_loss_pct, 1),
+            stop_price=round(fill_price - self.cfg.stop_loss_cents, 1),
             fees_usd=entry_fee,
             mode="live",
             entry_order_id=str(order.get("order_id") or ""),
@@ -269,7 +269,7 @@ class LiveTrader:
                 else:
                     yes_bid = ob.best_bid()
                     tp_value = (100.0 - yes_bid) if yes_bid is not None else pos_value
-                if tp_value >= pos.entry_price * (1.0 + self.cfg.take_profit_pct):
+                if tp_value >= pos.entry_price + self.cfg.take_profit_cents:
                     await self._try_close_position(pos, "take_profit")
                     continue
 
