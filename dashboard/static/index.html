@@ -329,6 +329,7 @@ tr:last-child td { border-bottom: none; }
     <span class="dot-label">KALSHI</span>
   </div>
   <span id="mode-badge" style="padding:4px 10px;border:1px solid var(--border);border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">PAPER</span>
+  <span style="padding:4px 10px;border:1px solid var(--yellow);color:var(--yellow);border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">MOMENTUM</span>
   <span id="velocity-badge" style="display:none;padding:4px 10px;background:var(--yellow);color:#000;border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap">⚡ VELOCITY PAUSE</span>
   <span id="session-uptime" style="color:var(--muted);font-size:10px;white-space:nowrap">UP 0s</span>
   <button id="kill-btn" onclick="sendKill()">KILL SWITCH</button>
@@ -371,7 +372,17 @@ tr:last-child td { border-bottom: none; }
         <span id="btc-tick" style="color:var(--muted);font-size:10px">—</span>
       </div>
       <div class="panel-body">
-        <div id="btc-price">—</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+          <div id="btc-price" style="margin-bottom:0">—</div>
+          <div id="prediction-box" style="flex:1;background:var(--surface);border-radius:4px;padding:6px 10px;display:flex;align-items:center;gap:8px">
+            <span style="color:var(--muted);font-size:9px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap">MODEL</span>
+            <span id="pred-direction" style="font-size:16px;font-weight:700;min-width:36px">—</span>
+            <span id="pred-pct" style="font-size:15px;font-weight:700;min-width:42px">—</span>
+            <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:40px">
+              <div id="pred-bar" style="height:100%;width:50%;background:var(--muted);border-radius:3px;transition:width 0.5s,background 0.3s"></div>
+            </div>
+          </div>
+        </div>
         <div id="sparkline-wrap">
           <svg id="sparkline" viewBox="0 0 400 60" preserveAspectRatio="none">
             <polyline id="spark-line"
@@ -391,6 +402,7 @@ tr:last-child td { border-bottom: none; }
           <div class="fv-row"><span class="fv-key">UP Ask</span>        <span class="fv-val" id="fv-yes-ask" style="color:var(--green)">—</span></div>
           <div class="fv-row"><span class="fv-key">DOWN Ask</span>         <span class="fv-val" id="fv-no-ask"  style="color:var(--red)">—</span></div>
           <div class="fv-row"><span class="fv-key">Gap</span>            <span class="fv-val" id="gap-val">—</span></div>
+          <div class="fv-row"><span class="fv-key">Est. End Price</span> <span class="fv-val" id="fv-predicted-close">—</span></div>
           <div class="fv-row" style="grid-column:1/-1"><span class="fv-key">Last Settled</span> <span class="fv-val" id="fv-last-settled" style="color:var(--muted);font-size:11px">—</span></div>
         </div>
       </div>
@@ -535,8 +547,8 @@ function renderMetrics(s) {
   for (const p of (s.open_positions || [])) {
     const cur = mid != null ? (p.side === 'yes' ? mid : 100 - mid) : (p.current_price || 0);
     unrealizedGross += (cur - p.entry_price) * p.qty / 100.0;
-    // Estimate exit fee on current value
-    unrealizedFees += cur * p.qty / 100.0 * feePct;
+    // Entry fee already paid + estimated exit fee
+    unrealizedFees += (p.fees_usd || 0) + cur * p.qty / 100.0 * feePct;
   }
   const totalNetPnl = (s.session_pnl || 0) + unrealizedGross - unrealizedFees;
   const totalFees = (s.session_fees_usd || 0) + unrealizedFees;
@@ -589,6 +601,33 @@ function renderBtc(s) {
     if (s.orderbook.mid != null)      setVal('fv-mid',     s.orderbook.mid.toFixed(1)               + '¢');
     if (s.orderbook.best_ask != null) setVal('fv-yes-ask', s.orderbook.best_ask.toFixed(1)          + '¢');
     if (s.orderbook.best_bid != null) setVal('fv-no-ask',  (100 - s.orderbook.best_bid).toFixed(1)  + '¢');
+  }
+
+  // Model prediction (GBM probability)
+  if (s.prediction_yes_pct != null) {
+    const yp = s.prediction_yes_pct;
+    const dir = s.predicted_direction || (yp > 52 ? 'UP' : yp < 48 ? 'DOWN' : 'NEUTRAL');
+    const color = dir === 'UP' ? 'var(--green)' : dir === 'DOWN' ? 'var(--red)' : 'var(--yellow)';
+    const dispPct = dir === 'UP' ? yp.toFixed(1) : dir === 'DOWN' ? (100 - yp).toFixed(1) : '50.0';
+    const dirEl = document.getElementById('pred-direction');
+    dirEl.textContent = dir;
+    dirEl.style.color = color;
+    setVal('pred-pct', dispPct + '%');
+    const bar = document.getElementById('pred-bar');
+    bar.style.width = yp + '%';
+    bar.style.background = color;
+  }
+
+  // Estimated end price (linear velocity extrapolation)
+  if (s.predicted_btc_close > 0 && s.btc_open > 0) {
+    const pred = s.predicted_btc_close;
+    const delta = pred - s.btc_open;
+    const sign = delta >= 0 ? '+' : '';
+    const el = document.getElementById('fv-predicted-close');
+    if (el) {
+      el.textContent = '$' + fmt(pred) + ' (' + sign + '$' + delta.toFixed(0) + ')';
+      el.style.color = delta >= 0 ? 'var(--green)' : 'var(--red)';
+    }
   }
 
   // Last settled
@@ -662,7 +701,7 @@ function renderPositions(s) {
   for (const p of poss) {
     const cur = mid != null ? (p.side === 'yes' ? mid : 100 - mid) : (p.current_price || 0);
     unrealizedGross += (cur - p.entry_price) * p.qty / 100.0;
-    unrealizedFees  += cur * p.qty / 100.0 * feePct;
+    unrealizedFees  += (p.fees_usd || 0) + cur * p.qty / 100.0 * feePct;
   }
   const totalNet = (s.session_pnl || 0) + unrealizedGross - unrealizedFees;
   const pnlEl = document.getElementById('pos-session-pnl');

@@ -14,9 +14,8 @@ Contract economics (Kalshi binary):
       NO  resolves → YES contracts settle at 0,  NO contracts settle at 100
 
 Stop loss rules:
-  • Position-level (30%): exit at market when position value ≤ 30% of entry
-  • Time stop (2 min): if window has ≤ 120 s left AND position is in loss, exit
-    at market (profitable positions ride to settlement)
+  • Position-level: exit when position value drops STOP_LOSS_CENTS below entry
+  • Force exit: close all positions when ≤ FORCE_EXIT_TAU_S seconds remain (never hold to resolution)
 
 Market exits use the live best bid for the position's side:
   • Selling YES → receive best YES bid
@@ -171,16 +170,15 @@ class PaperTrader:
                     await self._close_position_at(pos, exit_price, "stop_loss")
                     continue
 
-                # ── Time stop: ≤ 2 min left and position is in loss ──────────
-                in_loss = pos_value < pos.entry_price
-                if seconds_left <= 120.0 and in_loss:
+                # ── Force exit: close all positions before resolution ─────────
+                if seconds_left <= self.cfg.force_exit_tau_s:
                     exit_price = _simulate_exit_price(pos.side, ob) or mid
                     await self.state.log_event(
-                        f"TIME STOP {pos.id}  {pos.side.upper()}  "
-                        f"≤2 min left in loss  exit={exit_price:.1f}¢  "
+                        f"FORCE EXIT {pos.id}  {pos.side.upper()}  "
+                        f"≤{self.cfg.force_exit_tau_s:.0f}s left  exit={exit_price:.1f}¢  "
                         f"PnL=${pos.pnl:+.2f}"
                     )
-                    await self._close_position_at(pos, exit_price, "time_stop")
+                    await self._close_position_at(pos, exit_price, "force_exit")
 
     # ── Window expiry auto-settle ─────────────────────────────────────────────
 

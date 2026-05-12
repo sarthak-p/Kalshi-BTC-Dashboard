@@ -112,6 +112,9 @@ class StateManager:
         self.btc_feed_active: bool = False
         self.kalshi_feed_active: bool = False
 
+        # Kalshi mid price history for slow-market filter (last 2 min of ticks)
+        self.kalshi_mid_history: deque[tuple[float, float]] = deque(maxlen=240)
+
         # Contract / window
         self.active_contract: Optional[str] = None
         self.window_close_ts: float = 0.0
@@ -138,6 +141,21 @@ class StateManager:
         self.session_pnl: float = 0.0
         self.session_fees_usd: float = 0.0
         self.daily_loss: float = 0.0
+
+        # Pre-window technical bias (fetched from Binance, updated ~every 60s)
+        self.pre_window_bias: str = "neutral"   # "up" | "down" | "neutral"
+        self.tech_rsi: float = 50.0
+        self.tech_adx: float = 25.0
+        self.tech_bb_position: float = 0.5
+        self.tech_bb_width: float = 0.0
+
+        # One-and-done: set True after the first winning trade in a window
+        self.window_won: bool = False
+
+        # Prediction (updated every tick from scalper)
+        self.prediction_yes_pct: float = 50.0   # GBM probability YES wins (0–100)
+        self.predicted_direction: str = "NEUTRAL"  # "UP" | "DOWN" | "NEUTRAL"
+        self.predicted_btc_close: float = 0.0   # linear extrapolation of BTC to window end
 
         # Signals (display list — last 50)
         self.signals: deque[Signal] = deque(maxlen=50)
@@ -214,6 +232,9 @@ class StateManager:
         async with self._lock:
             self.orderbook = ob
             self.kalshi_feed_active = True
+            mid = ob.mid()
+            if mid is not None:
+                self.kalshi_mid_history.append((time.time(), mid))
         self._dirty.set()
 
     async def set_active_contract(
@@ -229,11 +250,41 @@ class StateManager:
             # If BTC is already live, anchor immediately rather than waiting for next tick
             if self.btc_price > 0:
                 self.btc_open = self.btc_price
+            self.window_won = False
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
         async with self._lock:
             self.btc_open = price
+        self._dirty.set()
+
+    async def update_technicals(
+        self,
+        rsi: float,
+        adx: float,
+        bb_position: float,
+        bb_width: float,
+        bias: str,
+    ) -> None:
+        async with self._lock:
+            self.tech_rsi = rsi
+            self.tech_adx = adx
+            self.tech_bb_position = bb_position
+            self.tech_bb_width = bb_width
+            self.pre_window_bias = bias
+        self._dirty.set()
+
+    async def update_prediction(self, yes_pct: float, predicted_close: float = 0.0) -> None:
+        async with self._lock:
+            self.prediction_yes_pct = round(yes_pct, 1)
+            if yes_pct > 52:
+                self.predicted_direction = "UP"
+            elif yes_pct < 48:
+                self.predicted_direction = "DOWN"
+            else:
+                self.predicted_direction = "NEUTRAL"
+            if predicted_close > 0:
+                self.predicted_btc_close = round(predicted_close, 2)
         self._dirty.set()
 
     async def add_signal(self, sig: Signal) -> None:
@@ -289,6 +340,7 @@ class StateManager:
             self.lifetime_trades += 1
             if pos.pnl > 0:
                 self.lifetime_wins += 1
+                self.window_won = True
             _save_lifetime_stats(self.lifetime_trades, self.lifetime_wins)
         self._dirty.set()
 
@@ -357,6 +409,19 @@ class StateManager:
             "session_net_pnl": round(self.session_pnl, 2),  # pnl already includes fees
             "taker_fee_pct": self.taker_fee_pct,
             "daily_loss": round(self.daily_loss, 2),
+            # Pre-window technicals
+            "pre_window_bias": self.pre_window_bias,
+            "window_won": self.window_won,
+            "technicals": {
+                "rsi": self.tech_rsi,
+                "adx": self.tech_adx,
+                "bb_position": self.tech_bb_position,
+                "bb_width": self.tech_bb_width,
+            },
+            # Prediction
+            "prediction_yes_pct": self.prediction_yes_pct,
+            "predicted_direction": self.predicted_direction,
+            "predicted_btc_close": self.predicted_btc_close,
             # Signals
             "signals": [asdict(s) for s in list(self.signals)[:20]],
             # Stats

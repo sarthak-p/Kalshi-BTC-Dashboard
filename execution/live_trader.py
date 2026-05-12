@@ -277,9 +277,8 @@ class LiveTrader:
                     await self._try_close_position(pos, "stop_loss")
                     continue
 
-                in_loss = pos_value < pos.entry_price
-                if seconds_left <= 120.0 and in_loss:
-                    await self._try_close_position(pos, "time_stop")
+                if seconds_left <= self.cfg.force_exit_tau_s:
+                    await self._try_close_position(pos, "force_exit")
 
     async def _try_close_position(self, pos: Position, reason: str) -> None:
         now = time.time()

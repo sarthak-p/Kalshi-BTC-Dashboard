@@ -32,11 +32,9 @@ class Settings(BaseSettings):
     )
 
     # ── Strategy ─────────────────────────────────────────────────────────────
-    # Annualised BTC implied vol used in the binary-option fair-value model
+    # Annualised BTC implied vol used in the GBM fair-value model (dashboard only)
     btc_sigma: float = Field(default=0.80, env="BTC_SIGMA")
-    # Fire a signal when |fair_value − kalshi_mid| / 100 exceeds this
-    signal_threshold: float = Field(default=0.08, env="SIGNAL_THRESHOLD")
-    confidence_threshold: float = Field(default=0.60, env="CONFIDENCE_THRESHOLD")
+    confidence_threshold: float = Field(default=0.45, env="CONFIDENCE_THRESHOLD")
     # Minimum seconds between consecutive signals (debounce)
     signal_debounce_s: float = Field(default=2.0, env="SIGNAL_DEBOUNCE_S")
 
@@ -45,14 +43,14 @@ class Settings(BaseSettings):
     max_position_size_usd: float = Field(default=20.0, env="MAX_POSITION_SIZE_USD")
     daily_loss_limit_usd: float = Field(default=5.0, env="DAILY_LOSS_LIMIT_USD")
     # Exit when position value drops this many cents below entry (absolute)
-    stop_loss_cents: float = Field(default=10.0, env="STOP_LOSS_CENTS")
+    stop_loss_cents: float = Field(default=12.0, env="STOP_LOSS_CENTS")
     # Take profit when position gains this many cents above entry (absolute)
     take_profit_cents: float = Field(default=20.0, env="TAKE_PROFIT_CENTS")
     # Only enter when at least this many seconds remain in the window
-    min_entry_window_s: float = Field(default=240.0, env="MIN_ENTRY_WINDOW_S")
-    # Only enter when the contract side costs between these prices (scalp zone)
-    min_entry_price_cents: float = Field(default=15.0, env="MIN_ENTRY_PRICE_CENTS")
-    max_entry_price_cents: float = Field(default=42.0, env="MAX_ENTRY_PRICE_CENTS")
+    min_entry_window_s: float = Field(default=120.0, env="MIN_ENTRY_WINDOW_S")
+    # Only enter when the confirmed-winner contract is in this price range
+    min_entry_price_cents: float = Field(default=60.0, env="MIN_ENTRY_PRICE_CENTS")
+    max_entry_price_cents: float = Field(default=85.0, env="MAX_ENTRY_PRICE_CENTS")
 
     # ── Paper trading ────────────────────────────────────────────────────────
     starting_balance: float = Field(default=1000.0, env="STARTING_BALANCE")
@@ -77,15 +75,43 @@ class Settings(BaseSettings):
     # giving the BTC feed and orderbook time to stabilise for the new window.
     new_window_settle_s: float = Field(default=15.0, env="NEW_WINDOW_SETTLE_S")
 
-    # ── Momentum / drift guards ───────────────────────────────────────────────
-    # BTC move (USD) over 30s to declare a momentum trend (lower = more sensitive)
+    # ── Momentum strategy ─────────────────────────────────────────────────────
+    # Minimum BTC move (USD) from window open to confirm direction
+    momentum_entry_usd: float = Field(default=30.0, env="MOMENTUM_ENTRY_USD")
+    # Monitor phase: only enter when this many seconds or fewer remain (last 8 min)
+    max_entry_window_s: float = Field(default=480.0, env="MAX_ENTRY_WINDOW_S")
+
+    # Hard close all open positions this many seconds before resolution
+    force_exit_tau_s: float = Field(default=90.0, env="FORCE_EXIT_TAU_S")
+
+    # ── Velocity pause (flash-crash guard) ───────────────────────────────────
+    # BTC move (USD) over 30s that triggers a 30s signal pause
     momentum_threshold_usd: float = Field(default=150.0, env="MOMENTUM_THRESHOLD_USD")
-    # Max fraction BTC can be below (YES) or above (NO) the window-open price
-    # before we stop entering that direction entirely (0.003 = 0.3%)
-    max_adverse_drift_pct: float = Field(default=0.003, env="MAX_ADVERSE_DRIFT_PCT")
-    # When YES ask >= this, momentum filter is bypassed for NO entries (spike fade)
-    # When NO ask >= this (YES ask <= 100 - this), momentum filter bypassed for YES entries
-    fade_extreme_cents: float = Field(default=72.0, env="FADE_EXTREME_CENTS")
+
+    # ── Pre-window technical analysis (Binance, no auth required) ────────────
+    # Symbol and candle interval used to fetch indicators before each window
+    binance_symbol: str = Field(default="BTCUSDT", env="BINANCE_SYMBOL")
+    binance_klines_interval: str = Field(default="1m", env="BINANCE_KLINES_INTERVAL")
+    # Block entries when pre-window bias contradicts the trade direction
+    # Set to False to use technicals as display-only without gating trades
+    bias_gate_enabled: bool = Field(default=True, env="BIAS_GATE_ENABLED")
+
+    # ── One-and-done ─────────────────────────────────────────────────────────
+    # After a winning trade, sit out the rest of the window
+    one_and_done: bool = Field(default=True, env="ONE_AND_DONE")
+
+    # ── "Away from the line" edge replication ────────────────────────────────
+    # Max number of times Kalshi mid may cross 50¢ during the monitoring window.
+    # Few crossings = price committed to one side. Too many = still choppy, skip.
+    max_line_crossings: int = Field(default=2, env="MAX_LINE_CROSSINGS")
+    # Min fraction of recent 30-second steps where price moved further from 50¢.
+    # 0.6 = at least 3 of the last 5 steps trended away from the line.
+    min_direction_consistency: float = Field(default=0.6, env="MIN_DIRECTION_CONSISTENCY")
+
+    # ── Slow-market filter ────────────────────────────────────────────────────
+    # Block entries when the Kalshi contract price swings more than this many
+    # cents over the last 60 seconds (erratic / fast-moving market)
+    kalshi_mid_max_range_cents: float = Field(default=22.0, env="KALSHI_MID_MAX_RANGE_CENTS")
 
     # ── Fees ─────────────────────────────────────────────────────────────────
     # Kalshi taker fee as a fraction of traded dollar value (entry + exit)

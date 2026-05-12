@@ -49,8 +49,8 @@ async def main() -> None:
     await state.log_event(
         f"Bot starting — env={settings.kalshi_env}  "
         f"mode={settings.trading_mode}  "
-        f"threshold={settings.signal_threshold:.0%}  "
-        f"max_pos={settings.max_concurrent_positions}"
+        f"entry={settings.min_entry_price_cents:.0f}–{settings.max_entry_price_cents:.0f}¢  "
+        f"tp=+{settings.take_profit_cents:.0f}¢  sl=-{settings.stop_loss_cents:.0f}¢"
     )
 
     # ── Uvicorn config (non-blocking) ────────────────────────────────────────
