@@ -72,7 +72,9 @@ The Kalshi credentials are needed only for orderbook data. No orders are placed.
 
 ## Resolution vs. Model Accuracy
 
-At each window close the bot computes resolution using its own live Coinbase price at the moment it detects expiry. This is **not** pulled from Kalshi's settlement API — if BTC is near the strike at close, the bot's resolved result may differ from Kalshi's actual settlement. Treat the tracked prediction accuracy as approximate.
+At each window close the bot queries `GET /markets/{ticker}` on the Kalshi REST API for the official settlement result. Kalshi resolves using CF Benchmarks' Bitcoin Real Time Index (BRTI) — averaged over the 60 seconds before close — not Coinbase spot price. With `settlement_timer_seconds=1`, the result is typically available within seconds of close.
+
+The bot polls every 5 seconds for up to 2 minutes. If Kalshi doesn't return a result in that window (network failure, etc.), it falls back to estimating from the live Coinbase price. Each logged resolution is tagged `[Kalshi]` or `[estimated]` so you know which source was used.
 
 Prediction outcomes (and accuracy stats) are persisted in `logs/predictions.csv` across sessions, and lifetime counts are stored in `logs/lifetime_stats.json`.
 
@@ -149,6 +151,6 @@ logs/lifetime_stats.json     persisted prediction accuracy counters
 ## Notes
 
 - **No execution.** The bot is a read-only analysis tool. It subscribes to Kalshi's orderbook and Coinbase's price feed but never submits orders.
-- **Resolution accuracy.** The bot computes its own resolution from the live Coinbase price at window expiry, not from Kalshi's settlement API. Near-the-money closes may be recorded incorrectly.
+- **Resolution accuracy.** The bot queries Kalshi's settlement API for the official outcome (CF Benchmarks BRTI, not Coinbase spot). If the API call fails, it falls back to a Coinbase-price estimate and tags the log entry `[estimated]`.
 - **GBM is a model.** The fair-value estimate assumes log-normal price diffusion with realized vol from the last 10 minutes. It will misprice during trend continuation and low-vol regimes.
 - **Fees.** Kalshi charges ~7% taker fee per trade leg. Each round trip costs ~14% of notional. Factor this into any profitability analysis.
