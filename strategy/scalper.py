@@ -1,30 +1,26 @@
 """
-Momentum scalper for KXBTC15M.
+Market analyzer — computes GBM fair-value, technicals, and a trade recommendation
+every tick. No orders are placed; this is a decision-support tool.
 
-Signal logic:
-  - Monitor the first ~7 min of the 15-min window (no entries until ≤ MAX_ENTRY_WINDOW_S remain).
-  - After monitoring, buy the side (YES/NO) that matches the sustained BTC direction.
-  - Entry price must be in the confirmed-winner zone (MIN_ENTRY_PRICE_CENTS–MAX_ENTRY_PRICE_CENTS: 60–85¢).
-  - BTC must have moved at least MOMENTUM_ENTRY_USD from the window open.
-  - GBM fair-value model must broadly agree with the BTC direction (fv > 50 for YES, < 50 for NO).
-  - Exits handled by the trader: +TAKE_PROFIT_CENTS take-profit, -STOP_LOSS_CENTS stop loss,
-    and a hard FORCE_EXIT_TAU_S close of all positions before resolution.
+Recommendation logic (3-signal vote):
+  1. GBM model  — fv > 55 → YES lean, fv < 45 → NO lean
+  2. BTC move   — |change| > MOMENTUM_ENTRY_USD and direction → bullish/bearish
+  3. Tech bias  — pre-window RSI/BB bias: up/down/neutral
 
-Every 50 ms the scalper also:
-  - Computes the GBM fair-value probability (YES wins %) — shown as the model prediction.
-  - Extrapolates the current BTC velocity to estimate the price at window close.
+2 or 3 signals agreeing → recommend that side + best ask price.
+Also logs market resolution + model accuracy at each window close.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
 import math
 import time
-import uuid
 from typing import Optional
 
 from config import Settings
 from logger.event_logger import EventLogger
-from state.state_manager import Orderbook, Signal, StateManager
+from state.state_manager import Orderbook, StateManager
 
 _YEAR_SECONDS = 365.25 * 24 * 3600
 
@@ -38,7 +34,6 @@ def _rolling_realized_vol(
     fallback: float,
     lookback_s: float = 600.0,
 ) -> float:
-    """Annualized realized vol from recent BTC price history, clamped to [0.20, 2.50]."""
     if not history:
         return fallback
     cutoff = history[-1][0] - lookback_s
@@ -81,12 +76,6 @@ def _predict_btc_close(
     current_price: float,
     tau_seconds: float,
 ) -> float:
-    """Estimate BTC price at window close via a blend of medium and long-term velocity.
-
-    Uses two lookback windows — 90s and 300s — and weights the longer one more
-    heavily so that short-term noise doesn't whipsaw the forecast.  The result
-    is clamped to ±$500 of current price so spikes can't produce absurd numbers.
-    """
     if not history or tau_seconds <= 0:
         return current_price
     now = history[-1][0]
@@ -108,35 +97,205 @@ def _predict_btc_close(
     elif s300 is None:
         slope = s90
     else:
-        # Weight longer window 2:1 to dampen short-term noise
         slope = (s90 + s300 * 2.0) / 3.0
 
     raw = current_price + slope * tau_seconds
     return max(current_price - 500.0, min(current_price + 500.0, raw))
 
 
-class Scalper:
+def _compute_recommendation(
+    fv: float,
+    btc_change: float,
+    bias: str,
+    ob: Orderbook,
+    momentum_usd: float,
+) -> dict:
+    basis = []
+
+    if fv > 55:
+        model_side = "YES"
+        basis.append(f"GBM: {fv:.0f}% → UP")
+    elif fv < 45:
+        model_side = "NO"
+        basis.append(f"GBM: {fv:.0f}% → DOWN")
+    else:
+        model_side = None
+        basis.append(f"GBM: {fv:.0f}% (neutral)")
+
+    if btc_change >= momentum_usd:
+        btc_side = "YES"
+        basis.append(f"BTC: +${btc_change:.0f} bullish")
+    elif btc_change <= -momentum_usd:
+        btc_side = "NO"
+        basis.append(f"BTC: -${abs(btc_change):.0f} bearish")
+    else:
+        btc_side = None
+        basis.append(f"BTC: ${btc_change:+.0f} (< ${momentum_usd:.0f} threshold)")
+
+    if bias == "up":
+        bias_side = "YES"
+        basis.append("Technicals: bullish (RSI/BB)")
+    elif bias == "down":
+        bias_side = "NO"
+        basis.append("Technicals: bearish (RSI/BB)")
+    else:
+        bias_side = None
+        basis.append("Technicals: neutral")
+
+    signals = [model_side, btc_side, bias_side]
+    yes_count = signals.count("YES")
+    no_count  = signals.count("NO")
+
+    if yes_count >= 2 and yes_count > no_count:
+        side = "YES"
+        entry_price = ob.best_ask()
+    elif no_count >= 2 and no_count > yes_count:
+        side = "NO"
+        bb = ob.best_bid()
+        entry_price = (100.0 - bb) if bb is not None else None
+    else:
+        side = None
+        entry_price = None
+
+    return {
+        "side": side,
+        "entry_price": round(entry_price, 1) if entry_price is not None else None,
+        "confidence": round(max(yes_count, no_count) / 3.0, 2),
+        "signal_count": max(yes_count, no_count),
+        "basis": basis,
+    }
+
+
+class Analyzer:
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger):
         self.state = state
         self.cfg = cfg
         self.logger = logger
-        self._last_signal_ts: float = 0.0
-        self._last_blocked_ts: dict[str, float] = {}
 
     async def run(self) -> None:
         await asyncio.gather(
-            self._evaluation_loop(),
+            self._analysis_loop(),
             self._bias_refresher(),
+            self._window_resolver(),
         )
 
-    async def _evaluation_loop(self) -> None:
+    # ── Analysis loop (every 50 ms) ───────────────────────────────────────────
+
+    async def _analysis_loop(self) -> None:
         while True:
-            if not self.state.kill_switch:
-                await self._evaluate()
+            await self._analyze()
             await asyncio.sleep(0.05)
 
+    async def _analyze(self) -> None:
+        btc: float = self.state.btc_price
+        btc_open: float = self.state.btc_open
+        ob: Orderbook = self.state.orderbook
+
+        if not self.state.active_contract or btc <= 0 or btc_open <= 0:
+            self.state.analysis["phase"] = "waiting"
+            return
+
+        now = time.time()
+        tau_seconds = max(0.0, self.state.window_close_ts - now)
+        history = list(self.state.btc_history)
+
+        sigma = _rolling_realized_vol(history, fallback=self.cfg.btc_sigma)
+        fv = fair_value_yes_cents(btc, btc_open, tau_seconds, sigma)
+        predicted_close = _predict_btc_close(history, btc, tau_seconds)
+        await self.state.update_prediction(fv, predicted_close)
+
+        # Phase
+        if tau_seconds > self.cfg.max_entry_window_s:
+            phase = "monitoring"
+        elif tau_seconds >= self.cfg.min_entry_window_s:
+            phase = "entry_open"
+        elif tau_seconds > 30.0:
+            phase = "too_late"
+        else:
+            phase = "closing"
+
+        btc_change = btc - btc_open
+        side = "yes" if btc_change > 0 else "no"
+
+        yes_ask = ob.best_ask() or 0.0
+        no_ask = (100.0 - ob.best_bid()) if ob.best_bid() is not None else 0.0
+        entry_price = yes_ask if side == "yes" else no_ask
+        price_in_range = (
+            self.cfg.min_entry_price_cents <= entry_price <= self.cfg.max_entry_price_cents
+        ) if entry_price > 0 else False
+
+        # Monitoring-window checks (line crossings, direction consistency)
+        monitoring_start = self.state.window_discovered_ts + self.cfg.new_window_settle_s
+        monitoring_mids = [(ts, m) for ts, m in self.state.kalshi_mid_history
+                           if ts >= monitoring_start]
+
+        line_crossings = None
+        crossings_ok = None
+        direction_score = None
+        direction_ok = None
+
+        if len(monitoring_mids) >= 10:
+            crossings = sum(
+                1 for i in range(1, len(monitoring_mids))
+                if (monitoring_mids[i][1] - 50.0) * (monitoring_mids[i - 1][1] - 50.0) < 0
+            )
+            line_crossings = crossings
+            crossings_ok = crossings <= self.cfg.max_line_crossings
+
+            mid = ob.mid()
+            if mid is not None and abs(mid - 50.0) < 20.0:
+                recent_mids = [(ts, m) for ts, m in monitoring_mids if ts >= now - 120.0]
+                if len(recent_mids) >= 6:
+                    step = len(recent_mids) // 6
+                    steps_away = 0
+                    for i in range(5):
+                        m0 = recent_mids[i * step][1]
+                        m1 = recent_mids[(i + 1) * step][1]
+                        if side == "yes" and m1 > m0:
+                            steps_away += 1
+                        elif side == "no" and m1 < m0:
+                            steps_away += 1
+                    direction_score = round(steps_away / 5.0, 2)
+                    direction_ok = direction_score >= self.cfg.min_direction_consistency
+            else:
+                direction_ok = True  # price deeply committed, check skipped
+
+        # Bias check
+        bias_dir = self.state.pre_window_bias
+        if bias_dir == "neutral":
+            bias_ok = None
+        elif (side == "yes" and bias_dir == "up") or (side == "no" and bias_dir == "down"):
+            bias_ok = True
+        else:
+            bias_ok = False
+
+        # Write analysis conditions (direct write — sole writer)
+        self.state.analysis.update({
+            "phase": phase,
+            "side": side,
+            "btc_move_ok": abs(btc_change) >= self.cfg.momentum_entry_usd,
+            "price_in_range": price_in_range,
+            "entry_price": round(entry_price, 1) if entry_price > 0 else None,
+            "line_crossings": line_crossings,
+            "crossings_ok": crossings_ok,
+            "direction_score": direction_score,
+            "direction_ok": direction_ok,
+            "bias_ok": bias_ok,
+        })
+
+        # Recommendation (direct write)
+        self.state.recommendation = _compute_recommendation(
+            fv=fv,
+            btc_change=btc_change,
+            bias=bias_dir,
+            ob=ob,
+            momentum_usd=self.cfg.momentum_entry_usd,
+        )
+        self.state._dirty.set()
+
+    # ── Technicals refresh (every 60 s) ───────────────────────────────────────
+
     async def _bias_refresher(self) -> None:
-        """Fetch Binance technical indicators once per minute and update state."""
         while True:
             await self._refresh_bias()
             await asyncio.sleep(60.0)
@@ -160,241 +319,79 @@ class Scalper:
             "bias": bias.bias,
         })
 
-    async def _evaluate(self) -> Optional[Signal]:
-        btc: float = self.state.btc_price
-        btc_open: float = self.state.btc_open
-        contract: Optional[str] = self.state.active_contract
-        window_close: float = self.state.window_close_ts
-        ob: Orderbook = self.state.orderbook
+    # ── Window resolver (every 1 s) ───────────────────────────────────────────
 
-        if not contract or btc <= 0 or btc_open <= 0:
-            self.state.live_conditions["phase"] = "waiting"
-            self.state.live_conditions["ready"] = False
-            return None
+    async def _window_resolver(self) -> None:
+        """At each window close: log actual resolution vs model prediction."""
+        seen_open: set[str] = set()
+        resolved: set[str] = set()
+        while True:
+            await asyncio.sleep(1.0)
+            contract = self.state.active_contract
+            close_ts = self.state.window_close_ts
+            if not contract or close_ts <= 0:
+                continue
+            now = time.time()
+            if now < close_ts:
+                seen_open.add(contract)
+                continue
+            if contract not in seen_open or contract in resolved:
+                continue
+            resolved.add(contract)
 
-        now = time.time()
-        tau_seconds = max(0.0, window_close - now)
-        history = list(self.state.btc_history)
+            btc_at_close = self.state.btc_price
+            btc_open = self.state.btc_open
+            resolved_yes = btc_at_close >= btc_open if btc_open > 0 else None
 
-        # ── Always update the prediction panel ───────────────────────────────
-        sigma = _rolling_realized_vol(history, fallback=self.cfg.btc_sigma)
-        fv = fair_value_yes_cents(btc, btc_open, tau_seconds, sigma)
-        predicted_close = _predict_btc_close(history, btc, tau_seconds)
-        await self.state.update_prediction(fv, predicted_close)
+            resolution = "YES" if resolved_yes else "NO" if resolved_yes is not None else "?"
+            btc_chg = btc_at_close - btc_open if btc_open > 0 else 0.0
+            chg_sign = "+" if btc_chg >= 0 else ""
 
-        # ── Compute window phase for the dashboard ────────────────────────────
-        if tau_seconds > self.cfg.max_entry_window_s:
-            phase = "monitoring"
-        elif tau_seconds >= self.cfg.min_entry_window_s:
-            phase = "entry_open"
-        elif tau_seconds >= self.cfg.force_exit_tau_s:
-            phase = "no_more_entries"
-        else:
-            phase = "force_exit"
+            predicted_dir = self.state.predicted_direction
+            prediction_yes_pct = self.state.prediction_yes_pct
+            pre_window_bias = self.state.pre_window_bias
 
-        # Shorthand to write conditions without a full copy every tick
-        conds = self.state.live_conditions
-        conds["phase"] = phase
-        conds["ready"] = False
-        conds["block_reason"] = None
+            prediction_correct: Optional[bool] = None
+            if resolved_yes is not None and predicted_dir != "NEUTRAL":
+                prediction_correct = (predicted_dir == "UP") == resolved_yes
 
-        # ── Trading gates ─────────────────────────────────────────────────────
-        if len(self.state.open_positions) >= self.cfg.max_concurrent_positions:
-            return None
-        if self.state.velocity_pause:
-            return None
-        if now - self.state.window_discovered_ts < self.cfg.new_window_settle_s:
-            return None
-        if self.state.open_interest < self.cfg.min_open_interest:
-            await self._log_blocked("thin_market", oi=self.state.open_interest, min_oi=self.cfg.min_open_interest)
-            return None
+            pred_label = ""
+            if prediction_correct is not None:
+                pred_label = f"  model={predicted_dir} [{'CORRECT' if prediction_correct else 'WRONG'}]"
 
-        # ── One-and-done: sit out after a winning trade this window ───────────
-        if self.cfg.one_and_done and self.state.window_won:
-            return None
-
-        mid = ob.mid()
-        if mid is None:
-            return None
-
-        # ── BTC direction ─────────────────────────────────────────────────────
-        btc_change = btc - btc_open
-        side = "yes" if btc_change > 0 else "no"
-        conds["side"] = side
-
-        yes_ask = ob.best_ask() or 0.0
-        no_ask = (100.0 - ob.best_bid()) if ob.best_bid() is not None else 0.0
-        entry_price = yes_ask if side == "yes" else no_ask
-        conds["entry_price"] = round(entry_price, 1)
-        conds["price_in_range"] = (
-            self.cfg.min_entry_price_cents <= entry_price <= self.cfg.max_entry_price_cents
-        )
-
-        # ── "Away from the line" checks — replicating the human edge ─────────
-        monitoring_start = self.state.window_discovered_ts + self.cfg.new_window_settle_s
-        monitoring_mids = [(ts, m) for ts, m in self.state.kalshi_mid_history
-                           if ts >= monitoring_start]
-
-        if len(monitoring_mids) >= 10:
-            # 1. Line crossing count
-            crossings = sum(
-                1 for i in range(1, len(monitoring_mids))
-                if (monitoring_mids[i][1] - 50.0) * (monitoring_mids[i - 1][1] - 50.0) < 0
+            resolution_msg = (
+                f"{contract}  BTC {btc_at_close:.2f}  "
+                f"({chg_sign}{btc_chg:.2f})  → {resolution}{pred_label}"
             )
-            conds["line_crossings"] = crossings
-            conds["crossings_ok"] = crossings <= self.cfg.max_line_crossings
-            if crossings > self.cfg.max_line_crossings:
-                conds["block_reason"] = "price_too_choppy"
-                await self._log_blocked("price_too_choppy", crossings=crossings,
-                                        max=self.cfg.max_line_crossings)
-                return None
+            await self.state.log_event(f"Window closed: {resolution_msg}")
+            await self.state.set_last_resolution(resolution_msg)
 
-            # 2. Direction consistency — skip if price already ≥20¢ from the line
-            price_distance = abs(mid - 50.0)
-            if price_distance < 20.0:
-                recent_mids = [(ts, m) for ts, m in monitoring_mids if ts >= now - 120.0]
-                if len(recent_mids) >= 6:
-                    step = len(recent_mids) // 6
-                    steps_away = 0
-                    for i in range(5):
-                        m0 = recent_mids[i * step][1]
-                        m1 = recent_mids[(i + 1) * step][1]
-                        if side == "yes" and m1 >= m0:
-                            steps_away += 1
-                        elif side == "no" and m1 <= m0:
-                            steps_away += 1
-                    consistency = steps_away / 5.0
-                    conds["direction_score"] = round(consistency, 2)
-                    conds["direction_ok"] = consistency >= self.cfg.min_direction_consistency
-                    if consistency < self.cfg.min_direction_consistency:
-                        conds["block_reason"] = "direction_inconsistent"
-                        await self._log_blocked("direction_inconsistent",
-                                                consistency=round(consistency, 2),
-                                                min=self.cfg.min_direction_consistency)
-                        return None
-            else:
-                # Price deeply committed — consistency check skipped
-                conds["direction_score"] = None
-                conds["direction_ok"] = True
-        else:
-            conds["line_crossings"] = None
-            conds["crossings_ok"] = None
-            conds["direction_score"] = None
-            conds["direction_ok"] = None
+            await self.logger.log("market_resolved", {
+                "ticker": contract,
+                "btc_open": round(btc_open, 2) if btc_open > 0 else None,
+                "btc_close": round(btc_at_close, 2),
+                "btc_change": round(btc_chg, 2),
+                "resolution": resolution,
+                "predicted_direction": predicted_dir,
+                "prediction_yes_pct": round(prediction_yes_pct, 1),
+                "pre_window_bias": pre_window_bias,
+                "prediction_correct": prediction_correct,
+            })
 
-        # ── Slow-market filter ────────────────────────────────────────────────
-        recent_mids_60 = [(ts, m) for ts, m in self.state.kalshi_mid_history
-                          if ts >= now - 60.0]
-        if len(recent_mids_60) >= 5:
-            mid_range = max(m for _, m in recent_mids_60) - min(m for _, m in recent_mids_60)
-            if mid_range > self.cfg.kalshi_mid_max_range_cents:
-                conds["block_reason"] = "market_too_erratic"
-                await self._log_blocked("market_too_erratic", range_cents=round(mid_range, 1))
-                return None
+            self.logger.log_prediction({
+                "session_ts": int(self.state.session_start_ts),
+                "date_utc": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+                "ticker": contract,
+                "floor_strike": round(btc_open, 2) if btc_open > 0 else "",
+                "btc_open": round(btc_open, 2) if btc_open > 0 else "",
+                "btc_close": round(btc_at_close, 2),
+                "btc_change": round(btc_chg, 2),
+                "resolution": resolution,
+                "predicted_direction": predicted_dir,
+                "prediction_yes_pct": round(prediction_yes_pct, 1),
+                "pre_window_bias": pre_window_bias,
+                "prediction_correct": prediction_correct,
+            })
 
-        # ── Pre-window bias gate ──────────────────────────────────────────────
-        bias_dir = self.state.pre_window_bias
-        bias_ok = True
-        if self.cfg.bias_gate_enabled:
-            if side == "yes" and bias_dir == "down":
-                bias_ok = False
-            elif side == "no" and bias_dir == "up":
-                bias_ok = False
-        conds["bias_ok"] = bias_ok
-        if not bias_ok:
-            conds["block_reason"] = "bias_disagrees"
-            await self._log_blocked("bias_disagrees", side=side, bias=bias_dir,
-                                    rsi=round(self.state.tech_rsi, 1))
-            return None
-
-        # ── Single entry window ───────────────────────────────────────────────
-        if not (self.cfg.min_entry_window_s <= tau_seconds <= self.cfg.max_entry_window_s):
-            return None
-
-        # ── BTC momentum gate ─────────────────────────────────────────────────
-        btc_move_ok = abs(btc_change) >= self.cfg.momentum_entry_usd
-        conds["btc_move_ok"] = btc_move_ok
-        if not btc_move_ok:
-            conds["block_reason"] = "momentum_insufficient"
-            await self._log_blocked(
-                "momentum_insufficient",
-                move=round(abs(btc_change), 2),
-                required=self.cfg.momentum_entry_usd,
-            )
-            return None
-
-        # ── Price range gate ──────────────────────────────────────────────────
-        if not conds["price_in_range"]:
-            conds["block_reason"] = "entry_price_out_of_range"
-            await self._log_blocked("entry_price_out_of_range", price=round(entry_price, 1))
-            return None
-
-        # ── GBM model gate ────────────────────────────────────────────────────
-        if side == "yes" and fv <= 50.0:
-            conds["block_reason"] = "model_disagrees"
-            await self._log_blocked("model_disagrees", side="yes", fv=round(fv, 1))
-            return None
-        if side == "no" and fv >= 50.0:
-            conds["block_reason"] = "model_disagrees"
-            await self._log_blocked("model_disagrees", side="no", fv=round(fv, 1))
-            return None
-
-        # ── Debounce ──────────────────────────────────────────────────────────
-        if now - self._last_signal_ts < self.cfg.signal_debounce_s:
-            return None
-
-        # ── One position per direction per contract ───────────────────────────
-        if any(p.market_ticker == contract and p.side == side for p in self.state.open_positions):
-            return None
-
-        # ── Confidence ────────────────────────────────────────────────────────
-        move_score = min(1.0, abs(btc_change) / (self.cfg.momentum_entry_usd * 3.0))
-        depth = sum(ob.yes_bids.values()) + sum(ob.yes_asks.values())
-        depth_score = min(1.0, depth / 500.0)
-        confidence = move_score * 0.7 + depth_score * 0.3
-
-        if confidence < self.cfg.confidence_threshold:
-            conds["block_reason"] = "confidence_below_threshold"
-            await self._log_blocked("confidence_below_threshold", conf=round(confidence, 3), threshold=self.cfg.confidence_threshold)
-            return None
-
-        # ── All gates passed — signal ready ───────────────────────────────────
-        conds["ready"] = True
-        self._last_signal_ts = now
-        gap_pct = abs(fv - mid) / 100.0
-        sig = Signal(
-            id=uuid.uuid4().hex[:8],
-            timestamp=now,
-            market_ticker=contract,
-            side=side,
-            btc_price=btc,
-            kalshi_mid=mid,
-            fair_value=round(fv, 2),
-            gap_pct=round(gap_pct, 4),
-            confidence=round(confidence, 3),
-            yes_ask=round(yes_ask, 1),
-            no_ask=round(no_ask, 1),
-        )
-        await self.state.add_signal(sig)
-        await self.logger.log("signal", {
-            "id": sig.id,
-            "side": side,
-            "btc": f"{btc:.2f}",
-            "btc_open": f"{btc_open:.2f}",
-            "btc_change": f"{btc_change:+.2f}",
-            "entry_price": f"{entry_price:.1f}",
-            "fv": f"{fv:.2f}",
-            "mid": f"{mid:.2f}",
-            "conf": f"{confidence:.3f}",
-            "sigma": f"{sigma:.3f}",
-            "predicted_close": f"{predicted_close:.2f}",
-            "tau_s": f"{tau_seconds:.0f}",
-        })
-        return sig
-
-    async def _log_blocked(self, reason: str, **data) -> None:
-        now = time.time()
-        if now - self._last_blocked_ts.get(reason, 0.0) < 10.0:
-            return
-        self._last_blocked_ts[reason] = now
-        await self.logger.log("signal_blocked", {"reason": reason, **data})
+            if prediction_correct is not None:
+                await self.state.record_prediction_outcome(prediction_correct)

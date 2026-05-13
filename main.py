@@ -1,6 +1,6 @@
 """
-Entry point.  Starts all feeds, the strategy loop, paper trader, risk monitor,
-the dashboard server, and the event logger — all concurrently via asyncio.gather.
+Entry point. Starts BTC feed, Kalshi feed, analyzer, dashboard server,
+and event logger — all concurrently via asyncio.gather.
 """
 from __future__ import annotations
 
@@ -12,48 +12,28 @@ import uvicorn
 
 from config import settings
 from dashboard.app import app
-from execution.live_trader import LiveTrader
 from feeds.btc_feed import BtcFeed
 from feeds.kalshi_ws import KalshiFeed
 from logger.event_logger import EventLogger
-from risk.risk_manager import RiskManager
-from simulation.paper_trader import PaperTrader
 from state.state_manager import StateManager
-from strategy.scalper import Scalper
+from strategy.scalper import Analyzer
 
 
 async def main() -> None:
-    # ── Shared objects ───────────────────────────────────────────────────────
     logger  = EventLogger()
-    state   = StateManager(
-        starting_balance=settings.starting_balance,
-        trading_mode=settings.trading_mode,
-        taker_fee_pct=settings.kalshi_taker_fee_pct,
-        momentum_threshold_usd=settings.momentum_threshold_usd,
-    )
-    risk    = RiskManager(cfg=settings, logger=logger)
-
-    # Inject state manager into FastAPI app
+    state   = StateManager(momentum_threshold_usd=settings.momentum_threshold_usd)
     app.state.state_manager = state
 
-    # ── Component instances ──────────────────────────────────────────────────
-    kalshi_feed  = KalshiFeed(state=state, cfg=settings, logger=logger)
-    btc_feed     = BtcFeed(state=state,     cfg=settings, logger=logger)
-    scalper      = Scalper(state=state,    cfg=settings, logger=logger)
-    trader = (
-        LiveTrader(state=state, cfg=settings, logger=logger, risk=risk)
-        if settings.trading_mode == "live"
-        else PaperTrader(state=state, cfg=settings, logger=logger, risk=risk)
-    )
+    kalshi_feed = KalshiFeed(state=state, cfg=settings, logger=logger)
+    btc_feed    = BtcFeed(state=state, cfg=settings, logger=logger)
+    analyzer    = Analyzer(state=state, cfg=settings, logger=logger)
 
     await state.log_event(
-        f"Bot starting — env={settings.kalshi_env}  "
-        f"mode={settings.trading_mode}  "
+        f"Dashboard started — env={settings.kalshi_env}  "
         f"entry={settings.min_entry_price_cents:.0f}–{settings.max_entry_price_cents:.0f}¢  "
-        f"tp=+{settings.take_profit_cents:.0f}¢  sl=-{settings.stop_loss_cents:.0f}¢"
+        f"momentum=${settings.momentum_entry_usd:.0f}"
     )
 
-    # ── Uvicorn config (non-blocking) ────────────────────────────────────────
     uv_config = uvicorn.Config(
         app=app,
         host=settings.dashboard_host,
@@ -62,7 +42,6 @@ async def main() -> None:
     )
     uv_server = uvicorn.Server(uv_config)
 
-    # ── Graceful shutdown on Ctrl+C ──────────────────────────────────────────
     loop = asyncio.get_running_loop()
 
     def _shutdown(*_):
@@ -74,10 +53,9 @@ async def main() -> None:
         loop.add_signal_handler(sig, _shutdown)
 
     print(
-        f"\n  Kalshi BTC Bot\n"
-        f"  Dashboard → http://{settings.dashboard_host}:{settings.dashboard_port}\n"
+        f"\n  Kalshi BTC Dashboard\n"
+        f"  Open → http://{settings.dashboard_host}:{settings.dashboard_port}\n"
         f"  Env: {settings.kalshi_env}  |  Series: {settings.btc_series_ticker}\n"
-        f"  Mode: {settings.trading_mode.upper()}\n"
         f"  BTC feed: Coinbase BTC-USD\n"
     )
 
@@ -86,9 +64,7 @@ async def main() -> None:
         state.broadcast_loop(),
         kalshi_feed.run(),
         btc_feed.run(),
-        scalper.run(),
-        trader.run(),
-        risk.run(state),
+        analyzer.run(),
         uv_server.serve(),
     )
 

@@ -27,6 +27,13 @@ class EventLogger:
         self._csv_path: Path | None = None
         self._fieldnames: list[str] = ["ts", "event", "data"]
 
+    _PRED_FIELDS: list[str] = [
+        "session_ts", "date_utc", "ticker", "floor_strike",
+        "btc_open", "btc_close", "btc_change", "resolution",
+        "predicted_direction", "prediction_yes_pct", "pre_window_bias",
+        "prediction_correct",
+    ]
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     async def log(self, event: str, data: dict[str, Any] | None = None) -> None:
@@ -37,6 +44,17 @@ class EventLogger:
         }
         async with self._lock:
             self._buffer.append(row)
+
+    def log_prediction(self, data: dict[str, Any]) -> None:
+        """Append one row to the persistent cross-session predictions log (synchronous)."""
+        LOG_DIR.mkdir(exist_ok=True)
+        pred_csv = LOG_DIR / "predictions.csv"
+        write_header = not pred_csv.exists()
+        with open(pred_csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self._PRED_FIELDS, extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+            writer.writerow(data)
 
     # ── Background flush loop (run as an asyncio task) ───────────────────────
 

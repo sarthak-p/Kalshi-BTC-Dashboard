@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -13,66 +13,30 @@ from fastapi import WebSocket
 _STATS_FILE = Path("logs/lifetime_stats.json")
 
 
-def _load_lifetime_stats() -> tuple[int, int]:
+def _load_pred_stats() -> tuple[int, int]:
     try:
         data = json.loads(_STATS_FILE.read_text())
-        return int(data.get("total_trades", 0)), int(data.get("total_wins", 0))
+        return int(data.get("pred_total", 0)), int(data.get("pred_correct", 0))
     except Exception:
         return 0, 0
 
 
-def _save_lifetime_stats(trades: int, wins: int) -> None:
+def _save_pred_stats(pred_total: int, pred_correct: int) -> None:
     try:
         _STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATS_FILE.write_text(json.dumps({"total_trades": trades, "total_wins": wins}))
+        try:
+            existing = json.loads(_STATS_FILE.read_text())
+        except Exception:
+            existing = {}
+        existing.update({"pred_total": pred_total, "pred_correct": pred_correct})
+        _STATS_FILE.write_text(json.dumps(existing))
     except Exception:
         pass
 
 
-# ── Shared data-model types ──────────────────────────────────────────────────
-
-@dataclass
-class Position:
-    id: str
-    market_ticker: str
-    side: str           # "yes" | "no"
-    entry_price: float  # cents (0-100) in the position's side
-    qty: int            # number of contracts
-    entry_time: float   # unix timestamp
-    cost_usd: float     # entry_price * qty / 100
-    current_price: float = 0.0
-    pnl: float = 0.0
-    status: str = "open"   # "open" | "closed"
-    close_price: float = 0.0
-    close_time: float = 0.0
-    close_reason: str = ""
-    stop_price: float = 0.0  # exit trigger: 30% of entry in position's side cents
-    fees_usd: float = 0.0   # accumulated taker fees (entry + exit)
-    mode: str = "paper"      # "paper" | "live"
-    entry_order_id: str = ""
-    entry_client_order_id: str = ""
-    close_order_id: str = ""
-
-
-@dataclass
-class Signal:
-    id: str
-    timestamp: float
-    market_ticker: str
-    side: str           # "yes" | "no"
-    btc_price: float
-    kalshi_mid: float
-    fair_value: float   # cents
-    gap_pct: float      # fraction (0.08 = 8%)
-    confidence: float
-    yes_ask: float = 0.0   # live YES ask at signal time (cents)
-    no_ask: float = 0.0    # live NO ask at signal time (cents)
-    acted: bool = False
-
-
 @dataclass
 class Orderbook:
-    yes_bids: dict = field(default_factory=dict)  # price(cents) -> qty
+    yes_bids: dict = field(default_factory=dict)
     yes_asks: dict = field(default_factory=dict)
     top_yes_bid: Optional[float] = None
     top_yes_ask: Optional[float] = None
@@ -96,102 +60,78 @@ class Orderbook:
         return bb if bb is not None else ba
 
 
-# ── Central state hub ────────────────────────────────────────────────────────
-
 class StateManager:
-    def __init__(
-        self,
-        starting_balance: float = 1000.0,
-        trading_mode: str = "paper",
-        taker_fee_pct: float = 0.07,
-        momentum_threshold_usd: float = 150.0,
-    ):
+    def __init__(self, momentum_threshold_usd: float = 150.0):
         # Feed state
         self.btc_price: float = 0.0
         self.btc_history: deque[tuple[float, float]] = deque(maxlen=300)
         self.btc_feed_active: bool = False
         self.kalshi_feed_active: bool = False
 
-        # Kalshi mid price history for slow-market filter (last 2 min of ticks)
-        self.kalshi_mid_history: deque[tuple[float, float]] = deque(maxlen=240)
+        self.kalshi_mid_history: deque[tuple[float, float]] = deque(maxlen=2000)
 
         # Contract / window
         self.active_contract: Optional[str] = None
         self.window_close_ts: float = 0.0
         self.window_open_ts: float = 0.0
-        self.window_discovered_ts: float = 0.0  # wall-clock time when market was discovered
-        self.open_interest: float = 0.0         # open_interest_fp from market_discovered
-        self.btc_open: float = 0.0  # BTC price at the moment the current window opened
+        self.window_discovered_ts: float = 0.0
+        self.open_interest: float = 0.0
+        self.btc_open: float = 0.0
 
         # Momentum / velocity
-        self.momentum_direction: str = "neutral"  # "up" | "down" | "neutral"
+        self.momentum_direction: str = "neutral"
         self.velocity_pause: bool = False
         self.velocity_pause_until: float = 0.0
+        self.momentum_threshold_usd: float = momentum_threshold_usd
 
         # Orderbook
         self.orderbook: Orderbook = Orderbook()
 
-        # Trading
-        self.trading_mode: str = trading_mode
-        self.taker_fee_pct: float = taker_fee_pct
-        self.momentum_threshold_usd: float = momentum_threshold_usd
-        self.open_positions: list[Position] = []
-        self.closed_positions: list[Position] = []
-        self.balance: float = starting_balance
-        self.session_pnl: float = 0.0
-        self.session_fees_usd: float = 0.0
-        self.daily_loss: float = 0.0
-
-        # Pre-window technical bias (fetched from Coinbase Exchange, updated ~every 60s)
-        self.pre_window_bias: str = "neutral"   # "up" | "down" | "neutral"
+        # Technicals
+        self.pre_window_bias: str = "neutral"
         self.tech_rsi: float = 50.0
         self.tech_adx: float = 25.0
         self.tech_bb_position: float = 0.5
         self.tech_bb_width: float = 0.0
-        self.tech_fetched: bool = False         # False until first successful Coinbase fetch
+        self.tech_fetched: bool = False
 
-        # One-and-done: set True after the first winning trade in a window
-        self.window_won: bool = False
+        # GBM model prediction
+        self.prediction_yes_pct: float = 50.0
+        self.predicted_direction: str = "NEUTRAL"
+        self.predicted_btc_close: float = 0.0
 
-        # Live signal conditions — updated every evaluation cycle by the scalper.
-        # Written directly (no lock) since the scalper is the sole writer in asyncio.
-        self.live_conditions: dict = {
-            "phase": "waiting",       # waiting|monitoring|entry_open|no_more_entries|force_exit
-            "side": None,             # "yes" | "no" | None
+        # Analysis conditions (written directly by analyzer — sole writer in asyncio)
+        self.analysis: dict = {
+            "phase": "waiting",
+            "side": None,
             "btc_move_ok": False,
             "price_in_range": False,
             "entry_price": None,
-            "line_crossings": None,   # int or None (not yet computed)
+            "line_crossings": None,
             "crossings_ok": None,
-            "direction_score": None,  # 0.0–1.0, or None if check was skipped
+            "direction_score": None,
             "direction_ok": None,
             "bias_ok": None,
-            "block_reason": None,     # last block reason string, or None
-            "ready": False,
         }
 
-        # Prediction (updated every tick from scalper)
-        self.prediction_yes_pct: float = 50.0   # GBM probability YES wins (0–100)
-        self.predicted_direction: str = "NEUTRAL"  # "UP" | "DOWN" | "NEUTRAL"
-        self.predicted_btc_close: float = 0.0   # linear extrapolation of BTC to window end
+        # Recommendation (written directly by analyzer)
+        self.recommendation: dict = {
+            "side": None,        # "YES" | "NO" | None
+            "entry_price": None,
+            "confidence": 0.0,
+            "signal_count": 0,   # how many of 3 indicators agree
+            "basis": [],
+        }
 
-        # Signals (display list — last 50)
-        self.signals: deque[Signal] = deque(maxlen=50)
-        # Queue consumed by paper trader; separate from display list
-        self.signal_queue: asyncio.Queue[Signal] = asyncio.Queue()
+        # Prediction accuracy (persisted across sessions)
+        self.lifetime_pred_total, self.lifetime_pred_correct = _load_pred_stats()
+        self.session_pred_total: int = 0
+        self.session_pred_correct: int = 0
 
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
-
-        # Control
-        self.kill_switch: bool = False
-
-        # Lifetime stats (persisted across sessions)
-        self.lifetime_trades, self.lifetime_wins = _load_lifetime_stats()
-
-        # Session metadata
+        self.last_resolution_msg: str = ""
         self.session_start_ts: float = time.time()
-        self.last_settlement_msg: str = ""
 
         # Internal
         self._lock = asyncio.Lock()
@@ -206,7 +146,7 @@ class StateManager:
     def unregister_ws(self, ws: WebSocket) -> None:
         self._connections.discard(ws)
 
-    # ── State-update methods (safe to call from any async task) ──────────────
+    # ── State-update methods ──────────────────────────────────────────────────
 
     async def update_btc(self, price: float) -> None:
         async with self._lock:
@@ -214,31 +154,24 @@ class StateManager:
             self.btc_price = price
             self.btc_history.append((ts, price))
             self.btc_feed_active = True
-            # Anchor baseline on the first tick after a new window opens
             if self.btc_open == 0.0 and self.active_contract:
                 self.btc_open = price
             self._update_momentum_velocity(ts, price)
         self._dirty.set()
 
     def _update_momentum_velocity(self, now: float, price: float) -> None:
-        """Compute momentum direction and velocity pause state. Called under lock."""
         history = list(self.btc_history)
-
-        # ── Velocity: move > $50 in 10 seconds → pause signals for 30 s ────
         p10 = _nearest_price(history, now - 10.0)
         if p10 is not None and abs(price - p10) > 50.0:
             self.velocity_pause = True
             self.velocity_pause_until = now + 30.0
         elif self.velocity_pause and now >= self.velocity_pause_until:
             self.velocity_pause = False
-
-        # ── Momentum: > $300 move sustained for 20+ seconds ─────────────────
         p30 = _nearest_price(history, now - 30.0)
         p20 = _nearest_price(history, now - 20.0)
         if p30 is not None and p20 is not None:
             delta_30 = price - p30
             delta_20 = price - p20
-            # Both windows move the same direction and the 30s move exceeds threshold
             if abs(delta_30) >= self.momentum_threshold_usd and delta_30 * delta_20 > 0:
                 self.momentum_direction = "up" if delta_30 > 0 else "down"
             else:
@@ -264,11 +197,9 @@ class StateManager:
             self.window_open_ts = open_ts
             self.window_discovered_ts = time.time()
             self.open_interest = open_interest
-            self.btc_open = 0.0  # reset; set by set_btc_open or first update_btc tick
-            # If BTC is already live, anchor immediately rather than waiting for next tick
+            self.btc_open = 0.0
             if self.btc_price > 0:
                 self.btc_open = self.btc_price
-            self.window_won = False
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
@@ -277,12 +208,7 @@ class StateManager:
         self._dirty.set()
 
     async def update_technicals(
-        self,
-        rsi: float,
-        adx: float,
-        bb_position: float,
-        bb_width: float,
-        bias: str,
+        self, rsi: float, adx: float, bb_position: float, bb_width: float, bias: str
     ) -> None:
         async with self._lock:
             self.tech_rsi = rsi
@@ -306,61 +232,19 @@ class StateManager:
                 self.predicted_btc_close = round(predicted_close, 2)
         self._dirty.set()
 
-    async def add_signal(self, sig: Signal) -> None:
-        async with self._lock:
-            self.signals.appendleft(sig)
-        await self.signal_queue.put(sig)
-        self._dirty.set()
-
-    async def mark_signal_acted(self, sig_id: str) -> None:
-        async with self._lock:
-            for s in self.signals:
-                if s.id == sig_id:
-                    s.acted = True
-                    break
-        self._dirty.set()
-
-    async def add_position(self, pos: Position) -> None:
-        async with self._lock:
-            self.open_positions.append(pos)
-            self.balance -= pos.cost_usd
-        self._dirty.set()
-
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
             self.open_interest = oi
         self._dirty.set()
 
-    async def set_balance(self, balance_usd: float) -> None:
+    async def record_prediction_outcome(self, correct: bool) -> None:
         async with self._lock:
-            self.balance = balance_usd
-        self._dirty.set()
-
-    async def update_position_price(self, pos_id: str, price: float) -> None:
-        async with self._lock:
-            for p in self.open_positions:
-                if p.id == pos_id:
-                    p.current_price = price
-                    p.pnl = (price - p.entry_price) * p.qty / 100.0
-                    break
-        self._dirty.set()
-
-    async def close_position(self, pos: Position) -> None:
-        async with self._lock:
-            self.open_positions = [p for p in self.open_positions if p.id != pos.id]
-            pos.status = "closed"
-            self.closed_positions.append(pos)
-            proceeds = pos.close_price * pos.qty / 100.0
-            pos.pnl = proceeds - pos.cost_usd - pos.fees_usd
-            self.balance += proceeds
-            self.session_pnl += pos.pnl
-            self.session_fees_usd += pos.fees_usd
-            self.daily_loss = max(0.0, -self.session_pnl)
-            self.lifetime_trades += 1
-            if pos.pnl > 0:
-                self.lifetime_wins += 1
-                self.window_won = True
-            _save_lifetime_stats(self.lifetime_trades, self.lifetime_wins)
+            self.session_pred_total += 1
+            self.lifetime_pred_total += 1
+            if correct:
+                self.session_pred_correct += 1
+                self.lifetime_pred_correct += 1
+            _save_pred_stats(self.lifetime_pred_total, self.lifetime_pred_correct)
         self._dirty.set()
 
     async def log_event(self, msg: str) -> None:
@@ -369,17 +253,12 @@ class StateManager:
             self.event_log.appendleft(f"[{ts}] {msg}")
         self._dirty.set()
 
-    async def activate_kill_switch(self) -> None:
+    async def set_last_resolution(self, msg: str) -> None:
         async with self._lock:
-            self.kill_switch = True
-        await self.log_event("KILL SWITCH ACTIVATED — no new positions")
-
-    async def set_last_settlement(self, msg: str) -> None:
-        async with self._lock:
-            self.last_settlement_msg = msg
+            self.last_resolution_msg = msg
         self._dirty.set()
 
-    # ── Serialisation ────────────────────────────────────────────────────────
+    # ── Serialisation ─────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
         now = time.time()
@@ -397,6 +276,7 @@ class StateManager:
             "window_seconds_left": max(0.0, self.window_close_ts - now),
             "btc_open": self.btc_open,
             "btc_change": round(self.btc_price - self.btc_open, 2) if self.btc_open > 0 else 0.0,
+            "open_interest": self.open_interest,
             # Momentum / velocity
             "momentum_direction": self.momentum_direction,
             "velocity_pause": self.velocity_pause,
@@ -407,32 +287,12 @@ class StateManager:
                 "mid": ob.mid(),
                 "top_yes_bid": ob.top_yes_bid,
                 "top_yes_ask": ob.top_yes_ask,
-                "yes_bids": {
-                    str(k): v
-                    for k, v in sorted(ob.yes_bids.items(), reverse=True)
-                },
-                "yes_asks": {
-                    str(k): v
-                    for k, v in sorted(ob.yes_asks.items())
-                },
+                "yes_bids": {str(k): v for k, v in sorted(ob.yes_bids.items(), reverse=True)},
+                "yes_asks": {str(k): v for k, v in sorted(ob.yes_asks.items())},
             },
             "kalshi_feed_active": self.kalshi_feed_active,
-            # Positions
-            "open_positions": [asdict(p) for p in self.open_positions],
-            "open_position_count": len(self.open_positions),
-            # Portfolio
-            "trading_mode": self.trading_mode,
-            "balance": round(self.balance, 2),
-            "session_pnl": round(self.session_pnl, 2),
-            "session_fees_usd": round(self.session_fees_usd, 4),
-            "session_net_pnl": round(self.session_pnl, 2),  # pnl already includes fees
-            "taker_fee_pct": self.taker_fee_pct,
-            "daily_loss": round(self.daily_loss, 2),
-            # Pre-window technicals
+            # Technicals
             "pre_window_bias": self.pre_window_bias,
-            "window_won": self.window_won,
-            # Live signal conditions (shallow copy — dict is small)
-            "live_conditions": dict(self.live_conditions),
             "technicals": {
                 "rsi": self.tech_rsi,
                 "adx": self.tech_adx,
@@ -440,38 +300,36 @@ class StateManager:
                 "bb_width": self.tech_bb_width,
                 "fetched": self.tech_fetched,
             },
-            # Prediction
+            # GBM prediction
             "prediction_yes_pct": self.prediction_yes_pct,
             "predicted_direction": self.predicted_direction,
             "predicted_btc_close": self.predicted_btc_close,
-            # Signals
-            "signals": [asdict(s) for s in list(self.signals)[:20]],
-            # Stats
-            "win_rate": self._win_rate(),
-            "lifetime_trades": self.lifetime_trades,
-            "lifetime_wins": self.lifetime_wins,
-            "avg_hold_time_s": round(self._avg_hold_time(), 1),
-            # Control
-            "kill_switch": self.kill_switch,
+            # Analysis conditions
+            "analysis": dict(self.analysis),
+            # Recommendation
+            "recommendation": dict(self.recommendation),
+            # Prediction accuracy
+            "lifetime_pred_total": self.lifetime_pred_total,
+            "lifetime_pred_correct": self.lifetime_pred_correct,
+            "lifetime_pred_accuracy": self._pred_accuracy(lifetime=True),
+            "session_pred_total": self.session_pred_total,
+            "session_pred_correct": self.session_pred_correct,
+            "session_pred_accuracy": self._pred_accuracy(lifetime=False),
             # Session
             "session_start_ts": self.session_start_ts,
-            "last_settlement_msg": self.last_settlement_msg,
+            "last_resolution_msg": self.last_resolution_msg,
             # Log
             "event_log": list(self.event_log)[:50],
         }
 
-    def _win_rate(self) -> float:
-        if self.lifetime_trades == 0:
+    def _pred_accuracy(self, lifetime: bool = True) -> float:
+        total = self.lifetime_pred_total if lifetime else self.session_pred_total
+        correct = self.lifetime_pred_correct if lifetime else self.session_pred_correct
+        if total == 0:
             return 0.0
-        return round(self.lifetime_wins / self.lifetime_trades, 3)
+        return round(correct / total, 3)
 
-    def _avg_hold_time(self) -> float:
-        closed = [p for p in self.closed_positions if p.close_time > 0]
-        if not closed:
-            return 0.0
-        return sum(p.close_time - p.entry_time for p in closed) / len(closed)
-
-    # ── Broadcast loop (run as a dedicated asyncio task) ─────────────────────
+    # ── Broadcast loop ─────────────────────────────────────────────────────────
 
     async def broadcast_loop(self) -> None:
         while True:
@@ -492,10 +350,7 @@ class StateManager:
         self._connections -= dead
 
 
-# ── Module-level helpers ─────────────────────────────────────────────────────
-
 def _nearest_price(history: list, target_ts: float) -> Optional[float]:
-    """Return the BTC price whose timestamp is nearest to target_ts, within 5 s."""
     best_price = None
     best_diff = float("inf")
     for ts, price in history:
