@@ -119,6 +119,58 @@ def _cvd_signal(cvd_window: float, cvd_total: float, btc_change: float = 0.0) ->
         return "NO" if btc_change <= 0 else None    # selling + falling = confirm; selling + rising = absorption
     return None
 
+def _kelly_position_size(
+        bankroll: float,
+        entry_price_cents: float,
+        win_probability: float,
+        fraction: float = 0.5,      # half-Kelly — conservative
+        max_bet_pct: float = 0.15,  # never risk more than 15% per round
+        min_bet: float = 5.0,       # minimum meaningful bet
+    ) -> dict:
+        """
+        Returns recommended bet size given bankroll and current edge.
+        
+        entry_price_cents: what you pay (e.g. 68 for YES at 68¢)
+        win_probability:   your model's historical accuracy (e.g. 0.91)
+        fraction:          Kelly fraction — 0.5 = half Kelly
+        """
+        if entry_price_cents <= 0 or entry_price_cents >= 100:
+            return {"bet": 0.0, "contracts": 0, "reason": "price out of range"}
+        
+        # Net odds: profit per dollar risked if correct
+        profit_per_dollar = (100.0 - entry_price_cents) / entry_price_cents
+        
+        # Kelly fraction of bankroll
+        kelly_pct = (
+            (win_probability * profit_per_dollar - (1 - win_probability))
+            / profit_per_dollar
+        )
+        
+        if kelly_pct <= 0:
+            return {"bet": 0.0, "contracts": 0, "reason": "no edge at this price"}
+        
+        # Apply fraction and cap
+        bet_pct   = min(kelly_pct * fraction, max_bet_pct)
+        raw_bet   = bankroll * bet_pct
+        
+        # Round down to whole contracts (each contract costs entry_price_cents / 100 dollars)
+        cost_per_contract = entry_price_cents / 100.0
+        contracts = int(raw_bet / cost_per_contract)
+        actual_bet = round(contracts * cost_per_contract, 2)
+        
+        if actual_bet < min_bet:
+            return {"bet": 0.0, "contracts": 0, "reason": f"bet ${actual_bet:.2f} below minimum"}
+        
+        return {
+            "bet":          actual_bet,
+            "contracts":    contracts,
+            "cost_per":     round(cost_per_contract, 2),
+            "payout":       round(contracts * 1.0, 2),   # $1 per contract at resolution
+            "profit_if_win": round(contracts - actual_bet, 2),
+            "kelly_raw":    round(kelly_pct, 3),
+            "bet_pct":      round(bet_pct, 3),
+            "reason":       "ok",
+        }
 
 def _compute_recommendation(
     fv: float,
@@ -129,6 +181,8 @@ def _compute_recommendation(
     cvd_window: float = 0.0,
     cvd_total: float = 0.0,
     adx: float = 25.0,  
+    bankroll: float = 250.0, 
+    session_accuracy: float = 0.91,
 ) -> dict:
     basis = []
 
@@ -198,12 +252,20 @@ def _compute_recommendation(
         side = None
         entry_price = None
 
+    # Add bankroll and accuracy as parameters passed in from analyzer
+    sizing = _kelly_position_size(
+        bankroll=bankroll,
+        entry_price_cents=entry_price or 0.0,
+        win_probability=session_accuracy,
+    )
+
     return {
         "side": side,
         "entry_price": round(entry_price, 1) if entry_price is not None else None,
         "confidence": round(max(yes_count, no_count) / 4.0, 2),
         "signal_count": max(yes_count, no_count),
         "basis": basis,
+        "sizing": sizing,
     }
 
 
@@ -338,6 +400,8 @@ class Analyzer:
             cvd_window=self.state.cvd_window,
             cvd_total=self.state.cvd_total,
             adx=self.state.tech_adx,
+            bankroll=self.state.bankroll,                              
+            session_accuracy=self.state._pred_accuracy(lifetime=False) or 0.91,
         )
         self.state._dirty.set()
 
@@ -483,28 +547,70 @@ class Analyzer:
             "prediction_correct": prediction_correct,
             "predicted_resolution": predicted_resolution,
             "resolution_pred_correct": resolution_pred_correct,
-            "adx": round(tech_adx, 1), 
+            "adx": round(tech_adx, 1),
         })
 
+        # ── Sizing + bankroll update ──────────────────────────────────────────────
+        entry_price_used = self.state.recommendation.get("entry_price") or 68.0
+        accuracy = self.state._pred_accuracy(lifetime=False) or 0.91
+
+        sizing = _kelly_position_size(
+            bankroll=self.state.bankroll,
+            entry_price_cents=entry_price_used,
+            win_probability=accuracy,
+        )
+
+        if prediction_correct is True and sizing["bet"] > 0:
+            self.state.last_pnl = round(sizing["profit_if_win"], 2)
+            self.state.bankroll = round(self.state.bankroll + sizing["profit_if_win"], 2)
+        elif prediction_correct is False and sizing["bet"] > 0:
+            self.state.last_pnl = round(-sizing["bet"], 2)
+            self.state.bankroll = round(self.state.bankroll - sizing["bet"], 2)
+        else:
+            self.state.last_pnl = 0.0   # abstained — NEUTRAL prediction or no signal
+
+        self.state.last_bet    = sizing["bet"]
+        self.state.session_pnl = round(self.state.session_pnl + self.state.last_pnl, 2)
+        self.state._save_bankroll()
+
+        trade_status = (
+            "WIN"  if prediction_correct is True  else
+            "LOSS" if prediction_correct is False else
+            "SKIP"
+        )
+        await self.state.log_event(
+            f"💰 {trade_status}"
+            f"  PnL: ${self.state.last_pnl:+.2f}"
+            f"  Bet: ${sizing['bet']:.2f} × {sizing['contracts']} contracts"
+            f"  Bankroll: ${self.state.bankroll:.2f}"
+        )
+
+        # ── CSV log ───────────────────────────────────────────────────────────────
         self.logger.log_prediction({
-            "session_ts": int(self.state.session_start_ts),
-            "date_utc": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-            "ticker": ticker,
-            "floor_strike": round(btc_open, 2) if btc_open > 0 else "",
-            "btc_open": round(btc_open, 2) if btc_open > 0 else "",
-            "btc_close": round(btc_at_close, 2),
-            "btc_change": round(btc_chg, 2),
-            "resolution": resolution,
-            "result_source": result_source,
-            "predicted_direction": predicted_dir,
-            "prediction_yes_pct": round(prediction_yes_pct, 1),
-            "pre_window_bias": pre_window_bias,
-            "prediction_correct": prediction_correct,
-            "predicted_resolution": predicted_resolution,
+            "session_ts":              int(self.state.session_start_ts),
+            "date_utc":                datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "ticker":                  ticker,
+            "floor_strike":            round(btc_open, 2) if btc_open > 0 else "",
+            "btc_open":                round(btc_open, 2) if btc_open > 0 else "",
+            "btc_close":               round(btc_at_close, 2),
+            "btc_change":              round(btc_chg, 2),
+            "resolution":              resolution,
+            "result_source":           result_source,
+            "predicted_direction":     predicted_dir,
+            "prediction_yes_pct":      round(prediction_yes_pct, 1),
+            "pre_window_bias":         pre_window_bias,
+            "prediction_correct":      prediction_correct,
+            "predicted_resolution":    predicted_resolution,
             "resolution_pred_correct": resolution_pred_correct,
-            "adx": round(tech_adx, 1),           
+            "adx":                     round(tech_adx, 1),
+            "entry_price":             entry_price_used,
+            "bet":                     round(sizing["bet"], 2),
+            "contracts":               sizing["contracts"],
+            "pnl":                     self.state.last_pnl,
+            "bankroll":                self.state.bankroll,
         })
 
+        # ── Accuracy tracking ─────────────────────────────────────────────────────
         if prediction_correct is not None:
             await self.state.record_prediction_outcome(prediction_correct)
         if resolution_pred_correct is not None:

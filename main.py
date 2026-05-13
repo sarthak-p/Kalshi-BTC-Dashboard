@@ -21,7 +21,8 @@ from strategy.scalper import Analyzer
 
 async def main() -> None:
     logger  = EventLogger()
-    state   = StateManager(momentum_threshold_usd=settings.momentum_threshold_usd)
+    state   = StateManager(momentum_threshold_usd=settings.momentum_threshold_usd, 
+                           starting_bankroll=settings.bankroll,)
     app.state.state_manager = state
 
     kalshi_feed = KalshiFeed(state=state, cfg=settings, logger=logger)
@@ -31,7 +32,8 @@ async def main() -> None:
     await state.log_event(
         f"Dashboard started — env={settings.kalshi_env}  "
         f"entry={settings.min_entry_price_cents:.0f}–{settings.max_entry_price_cents:.0f}¢  "
-        f"momentum=${settings.momentum_entry_usd:.0f}"
+        f"momentum=${settings.momentum_entry_usd:.0f}  "
+        f"bankroll=${state.bankroll:.2f}"
     )
 
     uv_config = uvicorn.Config(

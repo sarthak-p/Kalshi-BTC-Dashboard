@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     kalshi_rest_base: str = Field(default="", env="KALSHI_REST_BASE")
     kalshi_ws_base: str = Field(default="", env="KALSHI_WS_BASE")
 
+    bankroll: float = Field(default=250.0, env="BANKROLL")
+
     def model_post_init(self, __context) -> None:
         host = "demo-api.kalshi.com" if self.kalshi_env == "demo" else "api.elections.kalshi.com"
         if not self.kalshi_rest_base:

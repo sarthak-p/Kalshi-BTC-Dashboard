@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import WebSocket
 
 _STATS_FILE = Path("logs/lifetime_stats.json")
-
+_BANKROLL_FILE = Path("logs/bankroll.json")
 
 def _load_pred_stats() -> tuple[int, int, int, int]:
     try:
@@ -24,7 +24,6 @@ def _load_pred_stats() -> tuple[int, int, int, int]:
         )
     except Exception:
         return 0, 0, 0, 0
-
 
 def _save_pred_stats(
     pred_total: int, pred_correct: int, res_pred_total: int, res_pred_correct: int
@@ -73,7 +72,7 @@ class Orderbook:
 
 
 class StateManager:
-    def __init__(self, momentum_threshold_usd: float = 150.0):
+    def __init__(self, momentum_threshold_usd: float = 150.0, starting_bankroll: float = 250.0):
         # Feed state
         self.btc_price: float = 0.0
         self.btc_history: deque[tuple[float, float]] = deque(maxlen=300)
@@ -162,6 +161,11 @@ class StateManager:
         self.session_pred_correct: int = 0
         self.session_res_pred_total: int = 0
         self.session_res_pred_correct: int = 0
+
+        self.bankroll: float = self._load_bankroll(default=starting_bankroll)
+        self.last_bet: float = 0.0
+        self.last_pnl: float = 0.0
+        self.session_pnl: float = 0.0
 
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
@@ -281,11 +285,36 @@ class StateManager:
                 self.predicted_resolution = "NEUTRAL"
         self._dirty.set()
 
+    def _load_bankroll(self, default: float = 250.0) -> float:
+        try:
+            return float(json.loads(_BANKROLL_FILE.read_text())["bankroll"])
+        except Exception:
+            return default
+
+    def _save_bankroll(self) -> None:
+        try:
+            _BANKROLL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _BANKROLL_FILE.write_text(json.dumps({"bankroll": round(self.bankroll, 2)}))
+        except Exception:
+            pass
+
     def lock_entry_prediction(self) -> None:
-        """Freeze predicted_direction the first time the window enters entry_open phase."""
-        if not self.prediction_locked and self.predicted_direction != "NEUTRAL":
-            self.prediction_locked_direction = self.predicted_direction
-            self.prediction_locked = True
+        if self.prediction_locked:
+            return
+        if self.predicted_direction == "NEUTRAL":
+            return
+        mid = self.orderbook.mid()
+        if mid is not None:
+            if self.predicted_direction == "UP" and mid < 30:
+                self.prediction_locked_direction = "NEUTRAL"
+                self.prediction_locked = True
+                return
+            if self.predicted_direction == "DOWN" and mid > 70:
+                self.prediction_locked_direction = "NEUTRAL"
+                self.prediction_locked = True
+                return
+        self.prediction_locked_direction = self.predicted_direction
+        self.prediction_locked = True
 
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
@@ -431,6 +460,13 @@ class StateManager:
             "last_resolution_msg": self.last_resolution_msg,
             # Log
             "event_log": list(self.event_log)[:50],
+            # Bankroll
+            "bankroll": {
+                "balance":     round(self.bankroll, 2),
+                "last_bet":    round(self.last_bet, 2),
+                "last_pnl":    round(self.last_pnl, 2),
+                "session_pnl": round(self.session_pnl, 2),
+            },
         }
 
     def _pred_accuracy(self, lifetime: bool = True) -> float:

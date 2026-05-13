@@ -184,6 +184,33 @@ body {
     </div>
   </div>
 
+  <!-- Bankroll panel -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <div class="metric-card">
+      <div class="metric-label">Balance</div>
+      <div class="metric-value" id="bk-balance">—</div>
+      <div class="metric-sub" id="bk-balance-sub">starting $250</div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-label">Session P&L</div>
+      <div class="metric-value" id="bk-session-pnl">—</div>
+      <div class="metric-sub">this session</div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-label">Last Trade</div>
+      <div class="metric-value" id="bk-last-pnl">—</div>
+      <div class="metric-sub" id="bk-last-bet">—</div>
+    </div>
+
+    <div class="metric-card" style="border-color:var(--accent)">
+      <div class="metric-label">Next Bet (Kelly)</div>
+      <div class="metric-value" id="bk-next-bet">—</div>
+      <div class="metric-sub" id="bk-next-detail">—</div>
+    </div>
+  </div>
+
   <!-- Market conditions bar -->
   <div class="panel">
     <div class="panel-header">
@@ -453,6 +480,7 @@ function render(s) {
   renderBtc(s);
   renderAccuracy(s);
   renderEventLog(s);
+  renderBankroll(s);
 }
 
 // ── Top bar ────────────────────────────────────────────────────────────────
@@ -892,6 +920,54 @@ function renderEventLog(s) {
     const body = line.slice(ts.length);
     return `<div>${ts} <span>${escHtml(body)}</span></div>`;
   }).join('');
+}
+
+function renderBankroll(s) {
+  const bk  = s.bankroll || {};
+  const rec = s.recommendation || {};
+  const sz  = rec.sizing || {};
+
+  // Balance
+  const bal = bk.balance || 250;
+  const balEl = document.getElementById('bk-balance');
+  balEl.textContent = '$' + bal.toFixed(2);
+  balEl.style.color = bal >= 250 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('bk-balance-sub').textContent =
+    (bal - 250 >= 0 ? '+' : '') + '$' + (bal - 250).toFixed(2) + ' all-time';
+
+  // Session P&L
+  const spnl = bk.session_pnl || 0;
+  const spEl = document.getElementById('bk-session-pnl');
+  spEl.textContent = (spnl >= 0 ? '+' : '') + '$' + spnl.toFixed(2);
+  spEl.style.color = spnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Last trade
+  const lp = bk.last_pnl || 0;
+  const lpEl = document.getElementById('bk-last-pnl');
+  if (lp === 0) {
+    lpEl.textContent = '—';
+    lpEl.style.color = 'var(--muted)';
+    document.getElementById('bk-last-bet').textContent = 'no trade yet';
+  } else {
+    lpEl.textContent = (lp >= 0 ? '+' : '') + '$' + lp.toFixed(2);
+    lpEl.style.color = lp >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('bk-last-bet').textContent =
+      'risked $' + (bk.last_bet || 0).toFixed(2);
+  }
+
+  // Next bet (from Kelly sizing on current recommendation)
+  const nbEl = document.getElementById('bk-next-bet');
+  if (sz.reason === 'ok' && sz.bet > 0) {
+    nbEl.textContent = '$' + sz.bet.toFixed(2);
+    nbEl.style.color = 'var(--text)';
+    document.getElementById('bk-next-detail').textContent =
+      sz.contracts + ' contracts @ ' + (rec.entry_price || 0).toFixed(1) + '¢'
+      + '  →  win $' + sz.profit_if_win.toFixed(2);
+  } else {
+    nbEl.textContent = 'SKIP';
+    nbEl.style.color = 'var(--muted)';
+    document.getElementById('bk-next-detail').textContent = sz.reason || 'no signal';
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
