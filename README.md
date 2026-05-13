@@ -23,8 +23,9 @@ Fetches 50 one-minute candles from Coinbase Exchange and computes:
 | RSI(14) > 60 | Bearish point |
 | BB(20) position < 0.4 (near lower band) | Bullish point |
 | BB(20) position > 0.6 (near upper band) | Bearish point |
+| ADX(14) < 20 | Forces bias to neutral regardless of RSI/BB |
 
-Two or more points in the same direction → bias. Requires 2 signals to avoid single-indicator noise.
+Two or more points in the same direction → bias, unless ADX < 20 (choppy market), in which case technicals return neutral regardless.
 
 **4. CVD — Cumulative Volume Delta (Coinbase trade stream)**
 Tracks every Coinbase spot trade during the window. Buyer-initiated trades (hitting the ask) add to CVD; seller-initiated trades (hitting the bid) subtract. If net buying exceeds 8% of total window volume → bullish signal. If net selling exceeds 8% → bearish signal. Resets at each new window open.
@@ -32,7 +33,7 @@ Tracks every Coinbase spot trade during the window. Buyer-initiated trades (hitt
 CVD distinguishes real buying pressure from price drift. A BTC rally with negative CVD (sellers absorbing it) is a weaker setup than one where buyers are aggressively lifting.
 
 **Recommendation — the one signal to act on**
-Requires **3 of 4 signals** to agree (or 2 with zero opposition) before firing `BUY YES` or `BUY NO`. Shows: side, entry price (best ask or implied NO ask), signal count (X/4), and the reason each signal voted.
+Requires **3 of 4 signals** to agree in trending markets (ADX ≥ 20), or **3 of 4 with no opposition** in choppy markets (ADX < 20). In choppy conditions ADX also suppresses the technicals signal, effectively requiring GBM, BTC momentum, and CVD to align before firing. Shows: side, entry price (best ask or implied NO ask), signal count (X/4), and the reason each signal voted.
 
 **Only enter when the Recommendation fires AND the phase shows `ENTRY OPEN`.** During `MONITORING` (> 8 min left) the signals are forming — do not act. During `TOO LATE` (< 2 min) it's too late to enter with meaningful upside.
 
@@ -152,6 +153,7 @@ At contract discovery the bot resolves the strike in priority order:
 | `COINBASE_WS_URL` | Coinbase WS | Override Coinbase WebSocket URL |
 | `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind host |
 | `DASHBOARD_PORT` | `8000` | Dashboard port |
+| `ADX_CHOPPY_THRESHOLD` | `20` | ADX below this forces technicals to neutral and raises signal requirement to 3/4 |
 
 ## Project Layout
 

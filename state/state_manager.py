@@ -113,6 +113,10 @@ class StateManager:
         self.predicted_btc_close: float = 0.0
         self.predicted_resolution: str = "NEUTRAL"  # "YES" | "NO" | "NEUTRAL" (slope-based)
 
+        # Prediction locked at first entry-open tick (used for accuracy scoring)
+        self.prediction_locked_direction: str = "NEUTRAL"
+        self.prediction_locked: bool = False
+
         # External market data
         self.dvol: float = 0.0                   # Deribit DVOL index (annualized %)
         self.futures_basis_pct: float = 0.0      # (futures − spot) / spot × 100
@@ -234,6 +238,8 @@ class StateManager:
             self.cvd_window = 0.0
             self.cvd_total = 0.0
             self.cvd_history.clear()
+            self.prediction_locked_direction = "NEUTRAL"
+            self.prediction_locked = False
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
@@ -274,6 +280,12 @@ class StateManager:
             else:
                 self.predicted_resolution = "NEUTRAL"
         self._dirty.set()
+
+    def lock_entry_prediction(self) -> None:
+        """Freeze predicted_direction the first time the window enters entry_open phase."""
+        if not self.prediction_locked and self.predicted_direction != "NEUTRAL":
+            self.prediction_locked_direction = self.predicted_direction
+            self.prediction_locked = True
 
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
@@ -384,6 +396,8 @@ class StateManager:
             "predicted_direction": self.predicted_direction,
             "predicted_btc_close": self.predicted_btc_close,
             "predicted_resolution": self.predicted_resolution,
+            "prediction_locked_direction": self.prediction_locked_direction,
+            "prediction_locked": self.prediction_locked,
             # External market data
             "dvol": self.dvol,
             "futures_basis_pct": self.futures_basis_pct,

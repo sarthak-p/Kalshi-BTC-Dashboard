@@ -78,8 +78,7 @@ async def fetch_bias(
     rsi             = _rsi(closes)
     adx             = _adx(highs, lows, closes)
     bb_pos, bb_wid  = _bb_position(closes)
-    bias            = _classify(rsi, bb_pos)
-
+    bias            = _classify(rsi, bb_pos, adx)
     return TechnicalBias(
         rsi=round(rsi, 1),
         adx=round(adx, 1),
@@ -147,11 +146,11 @@ async def _fetch_okx_sentiment() -> Optional[tuple[float, float]]:
 
 # ── Indicator calculations ────────────────────────────────────────────────────
 
-def _classify(rsi: float, bb_pos: float) -> str:
+def _classify(rsi: float, bb_pos: float, adx: float = 25.0) -> str:
+    if adx < 20:
+        return "neutral"   # choppy market — don't trust RSI/BB signals
     bull = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
     bear = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
-    # Require 2 signals to set a directional bias — one marginal indicator alone
-    # (e.g. BB barely above 0.6 with neutral RSI) is not enough to block a trade.
     if bull >= 2 and bull > bear:
         return "up"
     if bear >= 2 and bear > bull:

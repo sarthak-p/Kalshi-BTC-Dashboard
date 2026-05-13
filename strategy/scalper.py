@@ -7,7 +7,8 @@ Recommendation logic (3-signal vote):
   2. BTC move   — |change| > MOMENTUM_ENTRY_USD and direction → bullish/bearish
   3. Tech bias  — pre-window RSI/BB bias: up/down/neutral
 
-2 or 3 signals agreeing → recommend that side + best ask price.
+2 or 3 signals agreeing (with at most 1 opposing) → recommend that side + best ask price.
+CVD is treated as neutral when it diverges from price direction (absorption signal).
 Also logs market resolution + model accuracy at each window close.
 """
 from __future__ import annotations
@@ -103,15 +104,19 @@ def _predict_btc_close(
     return max(current_price - 500.0, min(current_price + 500.0, raw))
 
 
-def _cvd_signal(cvd_window: float, cvd_total: float) -> Optional[str]:
-    """YES if net buying dominates, NO if net selling, None if too small to read."""
-    if cvd_total < 0.5:  # need at least 0.5 BTC traded to have signal
+def _cvd_signal(cvd_window: float, cvd_total: float, btc_change: float = 0.0) -> Optional[str]:
+    """YES/NO when CVD agrees with price direction; None when diverging or insufficient volume.
+
+    Divergence (e.g. net selling while price rises) indicates absorption — the
+    move is holding despite pressure — which is neutral, not a counter-signal.
+    """
+    if cvd_total < 0.5:
         return None
     ratio = cvd_window / cvd_total
-    if ratio > 0.08:    # 8%+ net buying
-        return "YES"
-    if ratio < -0.08:   # 8%+ net selling
-        return "NO"
+    if ratio > 0.08:
+        return "YES" if btc_change >= 0 else None   # buying + rising = confirm; buying + falling = distribution noise
+    if ratio < -0.08:
+        return "NO" if btc_change <= 0 else None    # selling + falling = confirm; selling + rising = absorption
     return None
 
 
@@ -123,6 +128,7 @@ def _compute_recommendation(
     momentum_usd: float,
     cvd_window: float = 0.0,
     cvd_total: float = 0.0,
+    adx: float = 25.0,  
 ) -> dict:
     basis = []
 
@@ -156,7 +162,7 @@ def _compute_recommendation(
         bias_side = None
         basis.append("Technicals: neutral")
 
-    cvd_side = _cvd_signal(cvd_window, cvd_total)
+    cvd_side = _cvd_signal(cvd_window, cvd_total, btc_change)
     if cvd_side == "YES":
         ratio_pct = round(cvd_window / cvd_total * 100) if cvd_total > 0 else 0
         basis.append(f"CVD: +{ratio_pct}% net buying")
@@ -171,6 +177,9 @@ def _compute_recommendation(
     no_count  = signals.count("NO")
 
     # With 4 signals: require clear majority (3+ OR 2 with no opposition)
+    min_signals = 3 if adx < 20 else 2
+
+    # In choppy markets require 3 signals; in trending markets 2 is enough
     if yes_count >= 3 and yes_count > no_count:
         side = "YES"
         entry_price = ob.best_ask()
@@ -178,10 +187,10 @@ def _compute_recommendation(
         side = "NO"
         bb = ob.best_bid()
         entry_price = (100.0 - bb) if bb is not None else None
-    elif yes_count == 2 and no_count == 0:
+    elif yes_count >= min_signals and no_count <= 1:
         side = "YES"
         entry_price = ob.best_ask()
-    elif no_count == 2 and yes_count == 0:
+    elif no_count >= min_signals and yes_count <= 1:
         side = "NO"
         bb = ob.best_bid()
         entry_price = (100.0 - bb) if bb is not None else None
@@ -244,6 +253,7 @@ class Analyzer:
             phase = "monitoring"
         elif tau_seconds >= self.cfg.min_entry_window_s:
             phase = "entry_open"
+            self.state.lock_entry_prediction()   # freeze on first entry_open tick
         elif tau_seconds > 30.0:
             phase = "too_late"
         else:
@@ -327,6 +337,7 @@ class Analyzer:
             momentum_usd=self.cfg.momentum_entry_usd,
             cvd_window=self.state.cvd_window,
             cvd_total=self.state.cvd_total,
+            adx=self.state.tech_adx,
         )
         self.state._dirty.set()
 
@@ -391,10 +402,11 @@ class Analyzer:
                 ticker=contract,
                 btc_at_close=self.state.btc_price,
                 btc_open=self.state.btc_open,
-                predicted_dir=self.state.predicted_direction,
+                predicted_dir=self.state.prediction_locked_direction,
                 prediction_yes_pct=self.state.prediction_yes_pct,
                 pre_window_bias=self.state.pre_window_bias,
                 predicted_resolution=self.state.predicted_resolution,
+                tech_adx=self.state.tech_adx,
             ))
 
     async def _settle_window(
@@ -406,6 +418,7 @@ class Analyzer:
         prediction_yes_pct: float,
         pre_window_bias: str,
         predicted_resolution: str = "NEUTRAL",
+        tech_adx: float = 0.0,
     ) -> None:
         """
         Poll Kalshi's settlement API for the official result.
@@ -470,6 +483,7 @@ class Analyzer:
             "prediction_correct": prediction_correct,
             "predicted_resolution": predicted_resolution,
             "resolution_pred_correct": resolution_pred_correct,
+            "adx": round(tech_adx, 1), 
         })
 
         self.logger.log_prediction({
@@ -488,6 +502,7 @@ class Analyzer:
             "prediction_correct": prediction_correct,
             "predicted_resolution": predicted_resolution,
             "resolution_pred_correct": resolution_pred_correct,
+            "adx": round(tech_adx, 1),           
         })
 
         if prediction_correct is not None:
