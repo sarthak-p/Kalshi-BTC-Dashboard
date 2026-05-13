@@ -13,22 +13,34 @@ from fastapi import WebSocket
 _STATS_FILE = Path("logs/lifetime_stats.json")
 
 
-def _load_pred_stats() -> tuple[int, int]:
+def _load_pred_stats() -> tuple[int, int, int, int]:
     try:
         data = json.loads(_STATS_FILE.read_text())
-        return int(data.get("pred_total", 0)), int(data.get("pred_correct", 0))
+        return (
+            int(data.get("pred_total", 0)),
+            int(data.get("pred_correct", 0)),
+            int(data.get("res_pred_total", 0)),
+            int(data.get("res_pred_correct", 0)),
+        )
     except Exception:
-        return 0, 0
+        return 0, 0, 0, 0
 
 
-def _save_pred_stats(pred_total: int, pred_correct: int) -> None:
+def _save_pred_stats(
+    pred_total: int, pred_correct: int, res_pred_total: int, res_pred_correct: int
+) -> None:
     try:
         _STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
         try:
             existing = json.loads(_STATS_FILE.read_text())
         except Exception:
             existing = {}
-        existing.update({"pred_total": pred_total, "pred_correct": pred_correct})
+        existing.update({
+            "pred_total": pred_total,
+            "pred_correct": pred_correct,
+            "res_pred_total": res_pred_total,
+            "res_pred_correct": res_pred_correct,
+        })
         _STATS_FILE.write_text(json.dumps(existing))
     except Exception:
         pass
@@ -99,6 +111,7 @@ class StateManager:
         self.prediction_yes_pct: float = 50.0
         self.predicted_direction: str = "NEUTRAL"
         self.predicted_btc_close: float = 0.0
+        self.predicted_resolution: str = "NEUTRAL"  # "YES" | "NO" | "NEUTRAL" (slope-based)
 
         # Analysis conditions (written directly by analyzer — sole writer in asyncio)
         self.analysis: dict = {
@@ -124,9 +137,16 @@ class StateManager:
         }
 
         # Prediction accuracy (persisted across sessions)
-        self.lifetime_pred_total, self.lifetime_pred_correct = _load_pred_stats()
+        (
+            self.lifetime_pred_total,
+            self.lifetime_pred_correct,
+            self.lifetime_res_pred_total,
+            self.lifetime_res_pred_correct,
+        ) = _load_pred_stats()
         self.session_pred_total: int = 0
         self.session_pred_correct: int = 0
+        self.session_res_pred_total: int = 0
+        self.session_res_pred_correct: int = 0
 
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
@@ -230,6 +250,15 @@ class StateManager:
                 self.predicted_direction = "NEUTRAL"
             if predicted_close > 0:
                 self.predicted_btc_close = round(predicted_close, 2)
+                if self.btc_open > 0:
+                    if predicted_close > self.btc_open:
+                        self.predicted_resolution = "YES"
+                    elif predicted_close < self.btc_open:
+                        self.predicted_resolution = "NO"
+                    else:
+                        self.predicted_resolution = "NEUTRAL"
+            else:
+                self.predicted_resolution = "NEUTRAL"
         self._dirty.set()
 
     async def update_open_interest(self, oi: float) -> None:
@@ -244,7 +273,23 @@ class StateManager:
             if correct:
                 self.session_pred_correct += 1
                 self.lifetime_pred_correct += 1
-            _save_pred_stats(self.lifetime_pred_total, self.lifetime_pred_correct)
+            _save_pred_stats(
+                self.lifetime_pred_total, self.lifetime_pred_correct,
+                self.lifetime_res_pred_total, self.lifetime_res_pred_correct,
+            )
+        self._dirty.set()
+
+    async def record_resolution_prediction_outcome(self, correct: bool) -> None:
+        async with self._lock:
+            self.session_res_pred_total += 1
+            self.lifetime_res_pred_total += 1
+            if correct:
+                self.session_res_pred_correct += 1
+                self.lifetime_res_pred_correct += 1
+            _save_pred_stats(
+                self.lifetime_pred_total, self.lifetime_pred_correct,
+                self.lifetime_res_pred_total, self.lifetime_res_pred_correct,
+            )
         self._dirty.set()
 
     async def log_event(self, msg: str) -> None:
@@ -304,6 +349,7 @@ class StateManager:
             "prediction_yes_pct": self.prediction_yes_pct,
             "predicted_direction": self.predicted_direction,
             "predicted_btc_close": self.predicted_btc_close,
+            "predicted_resolution": self.predicted_resolution,
             # Analysis conditions
             "analysis": dict(self.analysis),
             # Recommendation
@@ -315,6 +361,13 @@ class StateManager:
             "session_pred_total": self.session_pred_total,
             "session_pred_correct": self.session_pred_correct,
             "session_pred_accuracy": self._pred_accuracy(lifetime=False),
+            # Resolution prediction accuracy (slope-based)
+            "lifetime_res_pred_total": self.lifetime_res_pred_total,
+            "lifetime_res_pred_correct": self.lifetime_res_pred_correct,
+            "lifetime_res_pred_accuracy": self._res_pred_accuracy(lifetime=True),
+            "session_res_pred_total": self.session_res_pred_total,
+            "session_res_pred_correct": self.session_res_pred_correct,
+            "session_res_pred_accuracy": self._res_pred_accuracy(lifetime=False),
             # Session
             "session_start_ts": self.session_start_ts,
             "last_resolution_msg": self.last_resolution_msg,
@@ -325,6 +378,13 @@ class StateManager:
     def _pred_accuracy(self, lifetime: bool = True) -> float:
         total = self.lifetime_pred_total if lifetime else self.session_pred_total
         correct = self.lifetime_pred_correct if lifetime else self.session_pred_correct
+        if total == 0:
+            return 0.0
+        return round(correct / total, 3)
+
+    def _res_pred_accuracy(self, lifetime: bool = True) -> float:
+        total = self.lifetime_res_pred_total if lifetime else self.session_res_pred_total
+        correct = self.lifetime_res_pred_correct if lifetime else self.session_res_pred_correct
         if total == 0:
             return 0.0
         return round(correct / total, 3)

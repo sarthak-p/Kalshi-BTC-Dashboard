@@ -347,6 +347,7 @@ class Analyzer:
                 predicted_dir=self.state.predicted_direction,
                 prediction_yes_pct=self.state.prediction_yes_pct,
                 pre_window_bias=self.state.pre_window_bias,
+                predicted_resolution=self.state.predicted_resolution,
             ))
 
     async def _settle_window(
@@ -357,6 +358,7 @@ class Analyzer:
         predicted_dir: str,
         prediction_yes_pct: float,
         pre_window_bias: str,
+        predicted_resolution: str = "NEUTRAL",
     ) -> None:
         """
         Poll Kalshi's settlement API for the official result.
@@ -391,9 +393,15 @@ class Analyzer:
         if resolved_yes is not None and predicted_dir != "NEUTRAL":
             prediction_correct = (predicted_dir == "UP") == resolved_yes
 
+        resolution_pred_correct: Optional[bool] = None
+        if resolved_yes is not None and predicted_resolution != "NEUTRAL":
+            resolution_pred_correct = (predicted_resolution == "YES") == resolved_yes
+
         pred_label = ""
         if prediction_correct is not None:
             pred_label = f"  model={predicted_dir} [{'CORRECT' if prediction_correct else 'WRONG'}]"
+        if resolution_pred_correct is not None:
+            pred_label += f"  slope={'CORRECT' if resolution_pred_correct else 'WRONG'}"
 
         resolution_msg = (
             f"{ticker}  BTC {btc_at_close:.2f}  "
@@ -413,6 +421,8 @@ class Analyzer:
             "prediction_yes_pct": round(prediction_yes_pct, 1),
             "pre_window_bias": pre_window_bias,
             "prediction_correct": prediction_correct,
+            "predicted_resolution": predicted_resolution,
+            "resolution_pred_correct": resolution_pred_correct,
         })
 
         self.logger.log_prediction({
@@ -429,7 +439,11 @@ class Analyzer:
             "prediction_yes_pct": round(prediction_yes_pct, 1),
             "pre_window_bias": pre_window_bias,
             "prediction_correct": prediction_correct,
+            "predicted_resolution": predicted_resolution,
+            "resolution_pred_correct": resolution_pred_correct,
         })
 
         if prediction_correct is not None:
             await self.state.record_prediction_outcome(prediction_correct)
+        if resolution_pred_correct is not None:
+            await self.state.record_resolution_prediction_outcome(resolution_pred_correct)

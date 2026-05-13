@@ -29,6 +29,15 @@ Two or more points in the same direction → bias. Requires 2 signals to avoid s
 **Recommendation**
 When 2 or 3 signals agree on a direction, the dashboard shows: side (YES/NO), entry price (best ask or implied NO ask), confidence (signal_count / 3), and the basis for each signal.
 
+**Predicted Resolution**
+Separate from the trade recommendation, the dashboard shows a dedicated **Predicted Resolution** (YES/NO) card. This is a slope-based forecast: the analyzer extrapolates BTC price using the 90s and 300s linear slopes and projects where BTC will be at window close. If `predicted_btc_close > btc_open` → predicted YES; if below → predicted NO.
+
+This is intentionally distinct from the recommendation:
+- The **recommendation** requires 2/3 signals agreeing and is a *trade signal*.
+- The **predicted resolution** is simply the model's best guess at the actual outcome — useful when the signal count is only 1 and no recommendation fires.
+
+The card also flags whether the slope and GBM model agree (`Slope + GBM agree`) or conflict (`⚠ Slope / GBM conflict`), giving a quick read on conviction.
+
 **Monitoring conditions tracked**
 The dashboard also continuously checks the analysis preconditions that would apply to a discretionary entry:
 - `btc_move_ok` — BTC has moved ≥ $30 from the window open
@@ -77,6 +86,15 @@ At each window close the bot queries `GET /markets/{ticker}` on the Kalshi REST 
 The bot polls every 5 seconds for up to 2 minutes. If Kalshi doesn't return a result in that window (network failure, etc.), it falls back to estimating from the live Coinbase price. Each logged resolution is tagged `[Kalshi]` or `[estimated]` so you know which source was used.
 
 Prediction outcomes (and accuracy stats) are persisted in `logs/predictions.csv` across sessions, and lifetime counts are stored in `logs/lifetime_stats.json`.
+
+Two accuracy metrics are tracked independently:
+
+| Metric | What it measures | Keys in `lifetime_stats.json` |
+|---|---|---|
+| GBM Direction | Whether `predicted_direction` (UP/DOWN from GBM %) matched the actual resolution | `pred_total`, `pred_correct` |
+| Slope Prediction | Whether `predicted_resolution` (YES/NO from price-slope extrapolation) matched the actual resolution | `res_pred_total`, `res_pred_correct` |
+
+Both are shown side-by-side in the dashboard's Prediction Accuracy panel (lifetime and session), and logged per-market in `predictions.csv` as `predicted_resolution` and `resolution_pred_correct`.
 
 ## Architecture
 
