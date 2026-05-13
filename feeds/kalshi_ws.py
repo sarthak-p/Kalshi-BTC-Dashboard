@@ -393,28 +393,60 @@ class KalshiFeed:
     # ── Auth helpers ─────────────────────────────────────────────────────────
 
     def _sign(self, message: str) -> str:
-        key = self.cfg.kalshi_private_key
-        if key is None:
-            return ""
-        sig = key.sign(
-            message.encode(),
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH,
-            ),
-            hashes.SHA256(),
-        )
-        return base64.b64encode(sig).decode()
+        return _sign_msg(self.cfg.kalshi_private_key, message)
 
     def _rest_headers(self, method: str, path: str) -> dict:
-        ts = str(int(time.time() * 1000))
-        sig = self._sign(ts + method.upper() + path)
-        return {
-            "KALSHI-ACCESS-KEY": self.cfg.kalshi_api_key_id,
-            "KALSHI-ACCESS-SIGNATURE": sig,
-            "KALSHI-ACCESS-TIMESTAMP": ts,
-            "Content-Type": "application/json",
-        }
+        return _make_rest_headers(self.cfg, method, path)
+
+
+def _sign_msg(private_key, message: str) -> str:
+    if private_key is None:
+        return ""
+    sig = private_key.sign(
+        message.encode(),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+    return base64.b64encode(sig).decode()
+
+
+def _make_rest_headers(cfg: Settings, method: str, path: str) -> dict:
+    ts = str(int(time.time() * 1000))
+    sig = _sign_msg(cfg.kalshi_private_key, ts + method.upper() + path)
+    return {
+        "KALSHI-ACCESS-KEY": cfg.kalshi_api_key_id,
+        "KALSHI-ACCESS-SIGNATURE": sig,
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "Content-Type": "application/json",
+    }
+
+
+async def fetch_kalshi_settlement(ticker: str, cfg: Settings) -> Optional[str]:
+    """
+    Query GET /markets/{ticker} and return 'yes', 'no', or None if not yet settled.
+
+    Kalshi uses CF Benchmarks' BRTI (not Coinbase spot) for settlement, so this
+    is the only reliable source of truth for binary outcome accuracy tracking.
+    settlement_timer_seconds=1 means the result is usually available within a
+    few seconds of window close.
+    """
+    url = f"{cfg.kalshi_rest_base}/markets/{ticker}"
+    path = urlparse(url).path
+    headers = _make_rest_headers(cfg, "GET", path)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            market = resp.json().get("market", {})
+        result = str(market.get("result", "")).lower()
+        if result in ("yes", "no"):
+            return result
+    except Exception:
+        pass
+    return None
 
 
 def _parse_price_cents(raw: str) -> Optional[float]:

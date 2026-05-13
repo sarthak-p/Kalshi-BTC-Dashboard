@@ -29,7 +29,7 @@ class EventLogger:
 
     _PRED_FIELDS: list[str] = [
         "session_ts", "date_utc", "ticker", "floor_strike",
-        "btc_open", "btc_close", "btc_change", "resolution",
+        "btc_open", "btc_close", "btc_change", "resolution", "result_source",
         "predicted_direction", "prediction_yes_pct", "pre_window_bias",
         "prediction_correct",
     ]

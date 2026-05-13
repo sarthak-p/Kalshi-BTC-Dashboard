@@ -322,7 +322,7 @@ class Analyzer:
     # ── Window resolver (every 1 s) ───────────────────────────────────────────
 
     async def _window_resolver(self) -> None:
-        """At each window close: log actual resolution vs model prediction."""
+        """At each window close: snapshot state and hand off to _settle_window."""
         seen_open: set[str] = set()
         resolved: set[str] = set()
         while True:
@@ -339,59 +339,97 @@ class Analyzer:
                 continue
             resolved.add(contract)
 
-            btc_at_close = self.state.btc_price
-            btc_open = self.state.btc_open
+            # Snapshot everything now — state will mutate as the next window opens.
+            asyncio.ensure_future(self._settle_window(
+                ticker=contract,
+                btc_at_close=self.state.btc_price,
+                btc_open=self.state.btc_open,
+                predicted_dir=self.state.predicted_direction,
+                prediction_yes_pct=self.state.prediction_yes_pct,
+                pre_window_bias=self.state.pre_window_bias,
+            ))
+
+    async def _settle_window(
+        self,
+        ticker: str,
+        btc_at_close: float,
+        btc_open: float,
+        predicted_dir: str,
+        prediction_yes_pct: float,
+        pre_window_bias: str,
+    ) -> None:
+        """
+        Poll Kalshi's settlement API for the official result.
+
+        Kalshi resolves using CF Benchmarks' BRTI (not Coinbase spot), so we
+        must query the API to get an accurate outcome. settlement_timer_seconds=1
+        means the result is usually available within seconds of close; we poll
+        up to 2 minutes before falling back to a Coinbase-price estimate.
+        """
+        from feeds.kalshi_ws import fetch_kalshi_settlement
+
+        kalshi_result: Optional[str] = None
+        for _ in range(24):  # 24 × 5 s = 2 minutes
+            kalshi_result = await fetch_kalshi_settlement(ticker, self.cfg)
+            if kalshi_result is not None:
+                break
+            await asyncio.sleep(5.0)
+
+        if kalshi_result is not None:
+            resolved_yes: Optional[bool] = kalshi_result == "yes"
+            resolution = kalshi_result.upper()
+            result_source = "Kalshi"
+        else:
             resolved_yes = btc_at_close >= btc_open if btc_open > 0 else None
-
             resolution = "YES" if resolved_yes else "NO" if resolved_yes is not None else "?"
-            btc_chg = btc_at_close - btc_open if btc_open > 0 else 0.0
-            chg_sign = "+" if btc_chg >= 0 else ""
+            result_source = "estimated"
 
-            predicted_dir = self.state.predicted_direction
-            prediction_yes_pct = self.state.prediction_yes_pct
-            pre_window_bias = self.state.pre_window_bias
+        btc_chg = btc_at_close - btc_open if btc_open > 0 else 0.0
+        chg_sign = "+" if btc_chg >= 0 else ""
 
-            prediction_correct: Optional[bool] = None
-            if resolved_yes is not None and predicted_dir != "NEUTRAL":
-                prediction_correct = (predicted_dir == "UP") == resolved_yes
+        prediction_correct: Optional[bool] = None
+        if resolved_yes is not None and predicted_dir != "NEUTRAL":
+            prediction_correct = (predicted_dir == "UP") == resolved_yes
 
-            pred_label = ""
-            if prediction_correct is not None:
-                pred_label = f"  model={predicted_dir} [{'CORRECT' if prediction_correct else 'WRONG'}]"
+        pred_label = ""
+        if prediction_correct is not None:
+            pred_label = f"  model={predicted_dir} [{'CORRECT' if prediction_correct else 'WRONG'}]"
 
-            resolution_msg = (
-                f"{contract}  BTC {btc_at_close:.2f}  "
-                f"({chg_sign}{btc_chg:.2f})  → {resolution}{pred_label}"
-            )
-            await self.state.log_event(f"Window closed: {resolution_msg}")
-            await self.state.set_last_resolution(resolution_msg)
+        resolution_msg = (
+            f"{ticker}  BTC {btc_at_close:.2f}  "
+            f"({chg_sign}{btc_chg:.2f})  → {resolution} [{result_source}]{pred_label}"
+        )
+        await self.state.log_event(f"Window closed: {resolution_msg}")
+        await self.state.set_last_resolution(resolution_msg)
 
-            await self.logger.log("market_resolved", {
-                "ticker": contract,
-                "btc_open": round(btc_open, 2) if btc_open > 0 else None,
-                "btc_close": round(btc_at_close, 2),
-                "btc_change": round(btc_chg, 2),
-                "resolution": resolution,
-                "predicted_direction": predicted_dir,
-                "prediction_yes_pct": round(prediction_yes_pct, 1),
-                "pre_window_bias": pre_window_bias,
-                "prediction_correct": prediction_correct,
-            })
+        await self.logger.log("market_resolved", {
+            "ticker": ticker,
+            "btc_open": round(btc_open, 2) if btc_open > 0 else None,
+            "btc_close": round(btc_at_close, 2),
+            "btc_change": round(btc_chg, 2),
+            "resolution": resolution,
+            "result_source": result_source,
+            "predicted_direction": predicted_dir,
+            "prediction_yes_pct": round(prediction_yes_pct, 1),
+            "pre_window_bias": pre_window_bias,
+            "prediction_correct": prediction_correct,
+        })
 
-            self.logger.log_prediction({
-                "session_ts": int(self.state.session_start_ts),
-                "date_utc": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                "ticker": contract,
-                "floor_strike": round(btc_open, 2) if btc_open > 0 else "",
-                "btc_open": round(btc_open, 2) if btc_open > 0 else "",
-                "btc_close": round(btc_at_close, 2),
-                "btc_change": round(btc_chg, 2),
-                "resolution": resolution,
-                "predicted_direction": predicted_dir,
-                "prediction_yes_pct": round(prediction_yes_pct, 1),
-                "pre_window_bias": pre_window_bias,
-                "prediction_correct": prediction_correct,
-            })
+        self.logger.log_prediction({
+            "session_ts": int(self.state.session_start_ts),
+            "date_utc": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "ticker": ticker,
+            "floor_strike": round(btc_open, 2) if btc_open > 0 else "",
+            "btc_open": round(btc_open, 2) if btc_open > 0 else "",
+            "btc_close": round(btc_at_close, 2),
+            "btc_change": round(btc_chg, 2),
+            "resolution": resolution,
+            "result_source": result_source,
+            "predicted_direction": predicted_dir,
+            "prediction_yes_pct": round(prediction_yes_pct, 1),
+            "pre_window_bias": pre_window_bias,
+            "prediction_correct": prediction_correct,
+        })
 
-            if prediction_correct is not None:
-                await self.state.record_prediction_outcome(prediction_correct)
+        if prediction_correct is not None:
+            await self.state.record_prediction_outcome(prediction_correct)

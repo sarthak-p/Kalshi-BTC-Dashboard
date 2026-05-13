@@ -1,35 +1,42 @@
-# Kalshi BTC 15-Min Scalping Bot
+# Kalshi BTC 15-Min Analysis Dashboard
 
-Automated trading bot for Kalshi BTC 15-minute binary markets, with paper and live execution modes and a real-time FastAPI dashboard.
+Real-time market analysis dashboard for Kalshi BTC 15-minute binary markets. Monitors active contracts, runs a GBM fair-value model, and generates trade recommendations — but does **not** place orders.
 
-## Strategy
+## What it does
 
-Each Kalshi `KXBTCD` contract is a binary: pays $1 if BTC closes at or above where it opened the 15-minute window, $0 otherwise. YES is the "BTC up" side, NO is the "BTC down" side.
+Each Kalshi `KXBTCD` contract is a binary: pays $1 if BTC closes at or above the window open price, $0 otherwise.
 
-The bot replicates a discretionary scalping approach:
+The bot connects to both Kalshi (orderbook + contract metadata) and Coinbase (live BTC price + 1-min candles), then continuously analyzes each 15-minute window using three signals:
 
-**1. Monitor phase (first ~7 min — no trades)**
-The bot watches the BTC price and Kalshi orderbook without acting. It uses this period to:
-- Identify which direction BTC is sustaining momentum
-- Check that the Kalshi contract is committing to one side of 50¢ (few line crossings)
-- Confirm the price is drifting steadily away from 50¢, not oscillating
+**1. GBM Fair Value**
+Uses a Geometric Brownian Motion model to estimate the probability that BTC closes above the window-open strike. Inputs: current BTC price, strike, time remaining, and a rolling 10-minute realized volatility. Output: `fair_value_yes_pct` (0–100). Updates every 50ms.
 
-**2. Entry (last 2–8 min of the window)**
-After the monitoring phase, if conditions align, the bot buys the contract on the side BTC is trending — but only when:
-- The contract is priced at **60–85¢** (confirmed direction, still room to run)
-- BTC has moved at least **$30** from the window open
-- Pre-window BTC technicals (RSI, ADX, Bollinger Bands from Coinbase 1-min candles) agree with the direction
-- The Kalshi price has crossed 50¢ no more than twice during monitoring
-- At least 60% of recent price steps moved further from 50¢ (steady, not choppy)
+**2. BTC Momentum**
+Measures the dollar move from the window open. If `|move| >= MOMENTUM_ENTRY_USD` ($30 default), it contributes a directional signal.
 
-**3. Exit**
-- **Take profit:** +20¢ above entry
-- **Stop loss:** −12¢ below entry
-- **Force exit:** all positions closed 90 seconds before resolution — never holds to expiry
-- **One-and-done:** after a winning trade, the bot sits out the rest of that window
+**3. Pre-Window Technicals (Coinbase, refreshed every 60s)**
+Fetches 50 one-minute candles from Coinbase Exchange and computes:
 
-**Why 60–85¢?**
-Buying at 70¢ when the market is trending toward 100¢ gives a potential gain of ~30¢ on a 70¢ stake (43% return). The fixed take profit (+20¢) and stop loss (−12¢) give a 1.67:1 reward/risk ratio — profitable at any win rate above 38%.
+| Indicator | Signal |
+|---|---|
+| RSI(14) < 40 | Bullish point |
+| RSI(14) > 60 | Bearish point |
+| BB(20) position < 0.4 (near lower band) | Bullish point |
+| BB(20) position > 0.6 (near upper band) | Bearish point |
+
+Two or more points in the same direction → bias. Requires 2 signals to avoid single-indicator noise.
+
+**Recommendation**
+When 2 or 3 signals agree on a direction, the dashboard shows: side (YES/NO), entry price (best ask or implied NO ask), confidence (signal_count / 3), and the basis for each signal.
+
+**Monitoring conditions tracked**
+The dashboard also continuously checks the analysis preconditions that would apply to a discretionary entry:
+- `btc_move_ok` — BTC has moved ≥ $30 from the window open
+- `price_in_range` — Kalshi mid is 60–85¢ (confirmed direction, room to run)
+- `crossings_ok` — Kalshi mid has crossed 50¢ ≤ 2 times (steady, not choppy)
+- `direction_ok` — ≥60% of recent Kalshi mid steps moved further from 50¢
+- `bias_ok` — RSI/BB technicals agree with direction
+- `phase` — `monitoring` (> 8 min left) / `entry_open` (2–8 min) / `too_late` / `closing`
 
 ## Quick Start
 
@@ -46,7 +53,7 @@ python main.py
 
 Dashboard: `http://127.0.0.1:8000`
 
-Run in paper mode first (`TRADING_MODE=paper`) until you're satisfied with performance.
+The Kalshi credentials are needed only for orderbook data. No orders are placed.
 
 ## Kalshi Setup
 
@@ -61,50 +68,39 @@ Run in paper mode first (`TRADING_MODE=paper`) until you're satisfied with perfo
    ```bash
    base64 -i private.pem | tr -d '\n'
    ```
-5. Confirm `BTC_SERIES_TICKER` matches the current Kalshi series name.
+5. Confirm `BTC_SERIES_TICKER` matches the current Kalshi series name (`KXBTCD` by default).
 
-## Live Trading
+## Resolution vs. Model Accuracy
 
-To place real orders, set in `.env`:
+At each window close the bot computes resolution using its own live Coinbase price at the moment it detects expiry. This is **not** pulled from Kalshi's settlement API — if BTC is near the strike at close, the bot's resolved result may differ from Kalshi's actual settlement. Treat the tracked prediction accuracy as approximate.
 
-```env
-TRADING_MODE=live
-LIVE_TRADING_ACK=I_UNDERSTAND_THIS_PLACES_REAL_ORDERS
-LIVE_UNIT_SIZE=10
-LIVE_MAX_ORDER_COST_USD=5.00
-DAILY_LOSS_LIMIT_USD=5.0
-```
-
-Live mode is refused unless all credentials are present, the ack string matches exactly, `LIVE_MAX_ORDER_COST_USD ≤ 25`, and `DAILY_LOSS_LIMIT_USD ≤ 10`. Orders are fill-or-kill limits — no resting orders are left behind.
+Prediction outcomes (and accuracy stats) are persisted in `logs/predictions.csv` across sessions, and lifetime counts are stored in `logs/lifetime_stats.json`.
 
 ## Architecture
 
 ```text
 main.py
-  -> EventLogger.flush_loop()       async CSV flush every 5s
-  -> StateManager.broadcast_loop()  WebSocket push to dashboard
-  -> KalshiFeed.run()               REST contract discovery + WS orderbook
-  -> BtcFeed.run()                  Coinbase BTC-USD reference price
-  -> Scalper.run()                  signal generation + Coinbase technicals
-  -> PaperTrader / LiveTrader       position management and exits
-  -> RiskManager.run()              daily loss kill switch
-  -> FastAPI/Uvicorn                dashboard server
+  → EventLogger.flush_loop()       async CSV flush every 5s
+  → StateManager.broadcast_loop()  WebSocket push to dashboard
+  → KalshiFeed.run()               REST contract discovery + WS orderbook
+  → BtcFeed.run()                  Coinbase BTC-USD reference price (WS)
+  → Analyzer.run()
+      _analysis_loop()             GBM model + analysis conditions (every 50ms)
+      _bias_refresher()            Coinbase candle fetch + RSI/BB (every 60s)
+      _window_resolver()           logs resolution vs. prediction (every 1s)
+  → FastAPI/Uvicorn                dashboard server + WS broadcast
 ```
 
-All components share a single `StateManager` in-memory hub. Feeds write into it, the scalper reads from it, the trader records positions in it, and the dashboard streams snapshots from it over WebSocket.
+All components share a single `StateManager` in-memory hub. Feeds write into it, the analyzer reads from it, and the dashboard streams snapshots over WebSocket.
 
-## Technicals (Coinbase Exchange, free, no auth)
+## Strike Price (BTC Window Open)
 
-Every 60 seconds the bot fetches 50 one-minute candles from `api.exchange.coinbase.com` and computes:
-
-| Indicator | Signal |
-|---|---|
-| RSI(14) < 40 | Bullish point |
-| RSI(14) > 60 | Bearish point |
-| BB(20) position < 0.4 (near lower band) | Bullish point |
-| BB(20) position > 0.6 (near upper band) | Bearish point |
-
-Majority of points sets the bias (`up` / `down` / `neutral`). When `BIAS_GATE_ENABLED=true`, the bot skips trades where the pre-window bias contradicts the BTC direction. ADX(14) is computed and logged but does not gate entries.
+At contract discovery the bot resolves the strike in priority order:
+1. Numeric fields from the Kalshi API (`floor_strike`, `cap_strike`, `strike`)
+2. Regex parse of subtitle/title text (e.g. "Above $81,775.15")
+3. Ticker suffix (e.g. `KXBTC15M-26MAY2016-T81775.15`)
+4. Coinbase Exchange historical candle for the window-open timestamp
+5. In-memory BTC price history, or falling back to the current live price
 
 ## Configuration Reference
 
@@ -114,33 +110,21 @@ Majority of points sets the bias (`up` / `down` / `neutral`). When `BIAS_GATE_EN
 | `KALSHI_API_KEY_ID` | empty | Kalshi API key ID |
 | `KALSHI_PRIVATE_KEY_B64` | empty | Base64-encoded PEM private key |
 | `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract auto-discovery |
-| `TRADING_MODE` | `paper` | `paper` or `live` |
-| `MAX_ENTRY_WINDOW_S` | `480` | Enter only when ≤ this many seconds remain (~last 8 min) |
-| `MIN_ENTRY_WINDOW_S` | `120` | Stop new entries when < this many seconds remain |
-| `MIN_ENTRY_PRICE_CENTS` | `60` | Minimum contract price to enter (¢) |
-| `MAX_ENTRY_PRICE_CENTS` | `85` | Maximum contract price to enter (¢) |
-| `MOMENTUM_ENTRY_USD` | `30` | Minimum BTC move from window open to confirm direction |
-| `TAKE_PROFIT_CENTS` | `20` | Exit when position gains this many cents |
-| `STOP_LOSS_CENTS` | `12` | Exit when position loses this many cents |
-| `FORCE_EXIT_TAU_S` | `90` | Hard-close all positions this many seconds before resolution |
-| `ONE_AND_DONE` | `true` | Sit out rest of window after a winning trade |
-| `MAX_LINE_CROSSINGS` | `2` | Max times Kalshi mid may cross 50¢ during monitoring |
-| `MIN_DIRECTION_CONSISTENCY` | `0.6` | Min fraction of recent steps trending away from 50¢ |
-| `KALSHI_MID_MAX_RANGE_CENTS` | `22` | Max ¢ range in last 60s before market is too erratic |
-| `BIAS_GATE_ENABLED` | `true` | Block entries when RSI/BB contradicts direction |
-| `BINANCE_SYMBOL` | `BTC-USD` | Coinbase product ID for candle fetch |
-| `CONFIDENCE_THRESHOLD` | `0.45` | Minimum confidence score to act on a signal |
-| `SIGNAL_DEBOUNCE_S` | `2.0` | Minimum seconds between signals |
-| `MAX_CONCURRENT_POSITIONS` | `1` | Maximum open positions at once |
-| `DAILY_LOSS_LIMIT_USD` | `5.0` | Kill switch triggers at this session loss |
-| `MAX_POSITION_SIZE_USD` | `20.0` | Maximum paper position size |
-| `MIN_OPEN_INTEREST` | `500` | Skip signals in thin markets |
-| `NEW_WINDOW_SETTLE_S` | `15` | Wait this long after new contract discovery before trading |
-| `MOMENTUM_THRESHOLD_USD` | `150` | BTC move in 10s that triggers a 30s signal pause |
-| `STARTING_BALANCE` | `1000` | Paper trading starting balance |
-| `LIVE_UNIT_SIZE` | `10` | Target contracts per live order |
-| `LIVE_MAX_ORDER_COST_USD` | `5.00` | Max USD per live order (≤ $25) |
-| `LIVE_ORDER_COOLDOWN_S` | `10.0` | Min seconds between live order attempts |
+| `BTC_SIGMA` | `0.80` | Fallback annualized volatility for GBM model (0–2.5) |
+| `MAX_ENTRY_WINDOW_S` | `480` | Phase switches to `entry_open` when ≤ this many seconds remain |
+| `MIN_ENTRY_WINDOW_S` | `120` | Phase switches to `too_late` when < this many seconds remain |
+| `MIN_ENTRY_PRICE_CENTS` | `60` | Lower bound of the "in-range" price check (¢) |
+| `MAX_ENTRY_PRICE_CENTS` | `85` | Upper bound of the "in-range" price check (¢) |
+| `MOMENTUM_ENTRY_USD` | `30` | Min BTC move from window open to trigger momentum signal |
+| `MAX_LINE_CROSSINGS` | `2` | Max times Kalshi mid may cross 50¢ before `crossings_ok` fails |
+| `MIN_DIRECTION_CONSISTENCY` | `0.6` | Min fraction of recent Kalshi mid steps trending away from 50¢ |
+| `KALSHI_MID_MAX_RANGE_CENTS` | `22` | Max ¢ range in last 60s before market is flagged erratic |
+| `BIAS_GATE_ENABLED` | `true` | Flags `bias_ok=false` when RSI/BB contradicts BTC direction |
+| `MIN_OPEN_INTEREST` | `500` | Thin-market flag threshold |
+| `NEW_WINDOW_SETTLE_S` | `15` | Grace period after contract discovery before monitoring data counts |
+| `MOMENTUM_THRESHOLD_USD` | `150` | BTC move in 10s that triggers a 30s velocity pause flag |
+| `BINANCE_SYMBOL` | `BTC-USD` | Coinbase product ID for candle fetch (legacy env name) |
+| `COINBASE_WS_URL` | Coinbase WS | Override Coinbase WebSocket URL |
 | `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind host |
 | `DASHBOARD_PORT` | `8000` | Dashboard port |
 
@@ -151,22 +135,20 @@ main.py                      asyncio entry point
 config.py                    settings (reads .env)
 state/state_manager.py       shared in-memory hub, dataclasses, WebSocket broadcast
 feeds/kalshi_ws.py           Kalshi REST/WS feed, auth, contract discovery, orderbook
-feeds/btc_feed.py            Coinbase BTC-USD reference price feed
-execution/kalshi_client.py   authenticated Kalshi REST order client
-execution/live_trader.py     live FOK order execution and position monitor
-strategy/scalper.py          signal generation, monitoring phase, entry gates
+feeds/btc_feed.py            Coinbase BTC-USD live price (WebSocket)
+strategy/scalper.py          Analyzer: GBM model, recommendation, window resolver
 strategy/technicals.py       Coinbase candle fetch, RSI / ADX / BB computation
-simulation/paper_trader.py   paper portfolio, take profit, stop loss, force exit
-risk/risk_manager.py         position limits and daily loss kill switch
 logger/event_logger.py       in-memory event buffer and async CSV flush
 dashboard/app.py             FastAPI routes and WebSocket broadcast
 dashboard/static/index.html  browser dashboard
-logs/                        per-session CSV logs; lifetime_stats.json
+logs/session_<ts>.csv        per-session event log
+logs/predictions.csv         cross-session prediction outcomes
+logs/lifetime_stats.json     persisted prediction accuracy counters
 ```
 
 ## Notes
 
-- **Fees:** Kalshi charges ~7% taker fee per trade leg. Each round trip costs ~14% of notional. Factor this into any profitability analysis.
-- **Paper first:** the dashboard shows live P&L and win rate. Run in paper mode for at least a few days before going live.
-- **Live P&L is estimated** — use Kalshi as the source of truth for actual fills and settled balances.
-- **No backtest runner** is included. Historical performance must be inferred from session logs.
+- **No execution.** The bot is a read-only analysis tool. It subscribes to Kalshi's orderbook and Coinbase's price feed but never submits orders.
+- **Resolution accuracy.** The bot computes its own resolution from the live Coinbase price at window expiry, not from Kalshi's settlement API. Near-the-money closes may be recorded incorrectly.
+- **GBM is a model.** The fair-value estimate assumes log-normal price diffusion with realized vol from the last 10 minutes. It will misprice during trend continuation and low-vol regimes.
+- **Fees.** Kalshi charges ~7% taker fee per trade leg. Each round trip costs ~14% of notional. Factor this into any profitability analysis.
