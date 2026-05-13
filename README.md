@@ -153,4 +153,4 @@ logs/lifetime_stats.json     persisted prediction accuracy counters
 - **No execution.** The bot is a read-only analysis tool. It subscribes to Kalshi's orderbook and Coinbase's price feed but never submits orders.
 - **Resolution accuracy.** The bot queries Kalshi's settlement API for the official outcome (CF Benchmarks BRTI, not Coinbase spot). If the API call fails, it falls back to a Coinbase-price estimate and tags the log entry `[estimated]`.
 - **GBM is a model.** The fair-value estimate assumes log-normal price diffusion with realized vol from the last 10 minutes. It will misprice during trend continuation and low-vol regimes.
-- **Fees.** Kalshi charges ~7% taker fee per trade leg. Each round trip costs ~14% of notional. Factor this into any profitability analysis.
+- **Fees.** Kalshi taker fees use the formula 7% × p × (1-p) per side, where p is contract price. At 60–85¢ entry range, round-trip taker cost is ~2–3.4¢ per contract. Maker (limit) orders are ~75% cheaper. Factor this into any profitability analysis.
