@@ -113,6 +113,17 @@ class StateManager:
         self.predicted_btc_close: float = 0.0
         self.predicted_resolution: str = "NEUTRAL"  # "YES" | "NO" | "NEUTRAL" (slope-based)
 
+        # External market data
+        self.dvol: float = 0.0                   # Deribit DVOL index (annualized %)
+        self.futures_basis_pct: float = 0.0      # (futures − spot) / spot × 100
+        self.funding_rate_pct: float = 0.0       # Binance perp funding rate (%)
+        self.sentiment_fetched: bool = False
+
+        # CVD (Cumulative Volume Delta) from Coinbase trade stream
+        self.cvd_window: float = 0.0             # net buy BTC volume since window open
+        self.cvd_total: float = 0.0              # total BTC volume since window open
+        self.cvd_history: deque[tuple[float, float]] = deque(maxlen=5000)  # (ts, delta)
+
         # Analysis conditions (written directly by analyzer — sole writer in asyncio)
         self.analysis: dict = {
             "phase": "waiting",
@@ -220,6 +231,9 @@ class StateManager:
             self.btc_open = 0.0
             if self.btc_price > 0:
                 self.btc_open = self.btc_price
+            self.cvd_window = 0.0
+            self.cvd_total = 0.0
+            self.cvd_history.clear()
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
@@ -264,6 +278,26 @@ class StateManager:
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
             self.open_interest = oi
+        self._dirty.set()
+
+    async def update_dvol(self, dvol_pct: float) -> None:
+        async with self._lock:
+            self.dvol = round(dvol_pct, 1)
+        self._dirty.set()
+
+    async def update_market_sentiment(self, basis_pct: float, funding_pct: float) -> None:
+        async with self._lock:
+            self.futures_basis_pct = round(basis_pct, 4)
+            self.funding_rate_pct = round(funding_pct, 4)
+            self.sentiment_fetched = True
+        self._dirty.set()
+
+    async def update_cvd_trade(self, size: float, is_buy: bool) -> None:
+        delta = size if is_buy else -size
+        async with self._lock:
+            self.cvd_window += delta
+            self.cvd_total += size
+            self.cvd_history.append((time.time(), delta))
         self._dirty.set()
 
     async def record_prediction_outcome(self, correct: bool) -> None:
@@ -350,6 +384,16 @@ class StateManager:
             "predicted_direction": self.predicted_direction,
             "predicted_btc_close": self.predicted_btc_close,
             "predicted_resolution": self.predicted_resolution,
+            # External market data
+            "dvol": self.dvol,
+            "futures_basis_pct": self.futures_basis_pct,
+            "funding_rate_pct": self.funding_rate_pct,
+            "sentiment_fetched": self.sentiment_fetched,
+            # CVD
+            "cvd_window": round(self.cvd_window, 4),
+            "cvd_total": round(self.cvd_total, 4),
+            "cvd_ratio": round(self.cvd_window / self.cvd_total, 3) if self.cvd_total > 0 else 0.0,
+            "cvd_5m": round(sum(d for ts, d in self.cvd_history if ts >= now - 300.0), 4),
             # Analysis conditions
             "analysis": dict(self.analysis),
             # Recommendation

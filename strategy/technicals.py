@@ -24,7 +24,17 @@ import httpx
 # Format: [time, low, high, open, close, volume]  — newest candle first
 _COINBASE_CANDLES = "https://api.exchange.coinbase.com/products/{symbol}/candles"
 
+_DERIBIT_DVOL = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
+_OKX_FUNDING  = "https://www.okx.com/api/v5/public/funding-rate"
+
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class MarketSentiment:
+    dvol: float          # Deribit DVOL annualized % (e.g. 55.2)
+    basis_pct: float     # (futures − spot) / spot × 100
+    funding_pct: float   # Binance funding rate as % (e.g. 0.01)
 
 
 @dataclass
@@ -77,6 +87,62 @@ async def fetch_bias(
         bb_width=round(bb_wid, 4),
         bias=bias,
     )
+
+
+async def fetch_market_sentiment() -> Optional[MarketSentiment]:
+    """Fetch Deribit DVOL and OKX perp basis + funding. Returns None only if both fail."""
+    dvol      = await _fetch_dvol()
+    sentiment = await _fetch_okx_sentiment()
+    if dvol is None and sentiment is None:
+        return None
+    return MarketSentiment(
+        dvol=dvol or 0.0,
+        basis_pct=sentiment[0] if sentiment else 0.0,
+        funding_pct=sentiment[1] if sentiment else 0.0,
+    )
+
+
+async def _fetch_dvol() -> Optional[float]:
+    """Returns the latest Deribit BTC DVOL value (annualized %, e.g. 55.2)."""
+    import time as _time
+    now_ms   = int(_time.time() * 1000)
+    start_ms = now_ms - 3_600_000  # 1 hour back
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                _DERIBIT_DVOL,
+                params={
+                    "currency": "BTC",
+                    "resolution": "3600",
+                    "start_timestamp": start_ms,
+                    "end_timestamp": now_ms,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json().get("result", {}).get("data", [])
+            if data:
+                return float(data[-1][4])  # close of latest hourly candle
+    except Exception as exc:
+        _log.warning("_fetch_dvol: %s: %s", type(exc).__name__, exc)
+    return None
+
+
+async def _fetch_okx_sentiment() -> Optional[tuple[float, float]]:
+    """Returns (basis_pct, funding_rate_pct) from OKX BTC-USDT-SWAP. US-accessible."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(_OKX_FUNDING, params={"instId": "BTC-USDT-SWAP"})
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            if not data:
+                return None
+            d = data[0]
+            funding_pct = float(d["fundingRate"]) * 100.0
+            basis_pct   = float(d["premium"]) * 100.0   # (markPrice − indexPrice) / indexPrice
+            return basis_pct, funding_pct
+    except Exception as exc:
+        _log.warning("_fetch_okx_sentiment: %s: %s", type(exc).__name__, exc)
+    return None
 
 
 # ── Indicator calculations ────────────────────────────────────────────────────

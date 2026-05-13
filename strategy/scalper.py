@@ -103,12 +103,26 @@ def _predict_btc_close(
     return max(current_price - 500.0, min(current_price + 500.0, raw))
 
 
+def _cvd_signal(cvd_window: float, cvd_total: float) -> Optional[str]:
+    """YES if net buying dominates, NO if net selling, None if too small to read."""
+    if cvd_total < 0.5:  # need at least 0.5 BTC traded to have signal
+        return None
+    ratio = cvd_window / cvd_total
+    if ratio > 0.08:    # 8%+ net buying
+        return "YES"
+    if ratio < -0.08:   # 8%+ net selling
+        return "NO"
+    return None
+
+
 def _compute_recommendation(
     fv: float,
     btc_change: float,
     bias: str,
     ob: Orderbook,
     momentum_usd: float,
+    cvd_window: float = 0.0,
+    cvd_total: float = 0.0,
 ) -> dict:
     basis = []
 
@@ -142,14 +156,32 @@ def _compute_recommendation(
         bias_side = None
         basis.append("Technicals: neutral")
 
-    signals = [model_side, btc_side, bias_side]
+    cvd_side = _cvd_signal(cvd_window, cvd_total)
+    if cvd_side == "YES":
+        ratio_pct = round(cvd_window / cvd_total * 100) if cvd_total > 0 else 0
+        basis.append(f"CVD: +{ratio_pct}% net buying")
+    elif cvd_side == "NO":
+        ratio_pct = round(abs(cvd_window / cvd_total) * 100) if cvd_total > 0 else 0
+        basis.append(f"CVD: -{ratio_pct}% net selling")
+    else:
+        basis.append("CVD: neutral / insufficient volume")
+
+    signals = [model_side, btc_side, bias_side, cvd_side]
     yes_count = signals.count("YES")
     no_count  = signals.count("NO")
 
-    if yes_count >= 2 and yes_count > no_count:
+    # With 4 signals: require clear majority (3+ OR 2 with no opposition)
+    if yes_count >= 3 and yes_count > no_count:
         side = "YES"
         entry_price = ob.best_ask()
-    elif no_count >= 2 and no_count > yes_count:
+    elif no_count >= 3 and no_count > yes_count:
+        side = "NO"
+        bb = ob.best_bid()
+        entry_price = (100.0 - bb) if bb is not None else None
+    elif yes_count == 2 and no_count == 0:
+        side = "YES"
+        entry_price = ob.best_ask()
+    elif no_count == 2 and yes_count == 0:
         side = "NO"
         bb = ob.best_bid()
         entry_price = (100.0 - bb) if bb is not None else None
@@ -160,7 +192,7 @@ def _compute_recommendation(
     return {
         "side": side,
         "entry_price": round(entry_price, 1) if entry_price is not None else None,
-        "confidence": round(max(yes_count, no_count) / 3.0, 2),
+        "confidence": round(max(yes_count, no_count) / 4.0, 2),
         "signal_count": max(yes_count, no_count),
         "basis": basis,
     }
@@ -199,7 +231,10 @@ class Analyzer:
         tau_seconds = max(0.0, self.state.window_close_ts - now)
         history = list(self.state.btc_history)
 
-        sigma = _rolling_realized_vol(history, fallback=self.cfg.btc_sigma)
+        if self.state.dvol > 0:
+            sigma = self.state.dvol / 100.0   # Deribit DVOL is more stable than realized vol
+        else:
+            sigma = _rolling_realized_vol(history, fallback=self.cfg.btc_sigma)
         fv = fair_value_yes_cents(btc, btc_open, tau_seconds, sigma)
         predicted_close = _predict_btc_close(history, btc, tau_seconds)
         await self.state.update_prediction(fv, predicted_close)
@@ -290,6 +325,8 @@ class Analyzer:
             bias=bias_dir,
             ob=ob,
             momentum_usd=self.cfg.momentum_entry_usd,
+            cvd_window=self.state.cvd_window,
+            cvd_total=self.state.cvd_total,
         )
         self.state._dirty.set()
 
@@ -301,23 +338,33 @@ class Analyzer:
             await asyncio.sleep(60.0)
 
     async def _refresh_bias(self) -> None:
-        from strategy.technicals import fetch_bias
+        from strategy.technicals import fetch_bias, fetch_market_sentiment
         bias = await fetch_bias(
             symbol=self.cfg.binance_symbol,
             interval=self.cfg.binance_klines_interval,
         )
-        if bias is None:
-            return
-        await self.state.update_technicals(
-            bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
-        )
-        await self.logger.log("technicals", {
-            "rsi": bias.rsi,
-            "adx": bias.adx,
-            "bb_pos": bias.bb_position,
-            "bb_width": bias.bb_width,
-            "bias": bias.bias,
-        })
+        if bias is not None:
+            await self.state.update_technicals(
+                bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
+            )
+            await self.logger.log("technicals", {
+                "rsi": bias.rsi,
+                "adx": bias.adx,
+                "bb_pos": bias.bb_position,
+                "bb_width": bias.bb_width,
+                "bias": bias.bias,
+            })
+
+        sentiment = await fetch_market_sentiment()
+        if sentiment is not None:
+            if sentiment.dvol > 0:
+                await self.state.update_dvol(sentiment.dvol)
+            await self.state.update_market_sentiment(sentiment.basis_pct, sentiment.funding_pct)
+            await self.logger.log("market_sentiment", {
+                "dvol": sentiment.dvol,
+                "basis_pct": sentiment.basis_pct,
+                "funding_pct": sentiment.funding_pct,
+            })
 
     # ── Window resolver (every 1 s) ───────────────────────────────────────────
 

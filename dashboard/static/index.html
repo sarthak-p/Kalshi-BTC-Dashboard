@@ -59,7 +59,7 @@ body {
 .panel-body   { padding:12px 14px; }
 
 /* ── Metric cards ── */
-#metrics { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; }
+#metrics { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
 .metric-card   { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; }
 .metric-label  { font-size:10px; color:var(--muted); letter-spacing:1px; text-transform:uppercase; margin-bottom:4px; }
 .metric-value  { font-size:20px; font-weight:700; }
@@ -182,11 +182,6 @@ body {
       <div class="metric-value" id="m-oi">—</div>
       <div class="metric-sub">contracts</div>
     </div>
-    <div class="metric-card" style="border-width:2px" id="m-res-card">
-      <div class="metric-label">Predicted Resolution</div>
-      <div class="metric-value" id="m-res">—</div>
-      <div class="metric-sub" id="m-res-sub">slope forecast</div>
-    </div>
   </div>
 
   <!-- Market conditions bar -->
@@ -241,6 +236,30 @@ body {
         <div>
           <div class="mc-item-label">Window Phase</div>
           <div id="phase-val" class="mc-item-val">—</div>
+        </div>
+
+        <div>
+          <div class="mc-item-label">DVOL (Deribit IV)</div>
+          <div id="dvol-val" class="mc-item-val">—</div>
+          <div id="dvol-label" style="font-size:9px;color:var(--muted);margin-top:2px">annualized vol</div>
+        </div>
+
+        <div>
+          <div class="mc-item-label">Futures Basis</div>
+          <div id="basis-val" class="mc-item-val">—</div>
+          <div id="basis-label" style="font-size:9px;color:var(--muted);margin-top:2px">futures vs spot</div>
+        </div>
+
+        <div>
+          <div class="mc-item-label">Funding Rate</div>
+          <div id="funding-val" class="mc-item-val">—</div>
+          <div id="funding-label" style="font-size:9px;color:var(--muted);margin-top:2px">+ longs pay / − bears pay</div>
+        </div>
+
+        <div>
+          <div class="mc-item-label">CVD (window)</div>
+          <div id="cvd-val" class="mc-item-val">—</div>
+          <div id="cvd-label" style="font-size:9px;color:var(--muted);margin-top:2px">net buy BTC</div>
         </div>
 
       </div>
@@ -354,30 +373,16 @@ body {
       <div class="panel-header"><span>Prediction Accuracy</span></div>
       <div class="panel-body">
 
-        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">GBM Direction</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-          <div style="background:var(--surface);border-radius:var(--radius);padding:10px 12px;text-align:center">
-            <div style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Lifetime</div>
-            <div id="acc-lifetime-pct" style="font-size:22px;font-weight:700">—</div>
-            <div id="acc-lifetime-sub" style="font-size:10px;color:var(--muted);margin-top:2px">— / —</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+          <div style="background:var(--surface);border-radius:var(--radius);padding:14px 16px;text-align:center">
+            <div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">Lifetime</div>
+            <div id="acc-lifetime-pct" style="font-size:28px;font-weight:700">—</div>
+            <div id="acc-lifetime-sub" style="font-size:10px;color:var(--muted);margin-top:4px">— / — markets</div>
           </div>
-          <div style="background:var(--surface);border-radius:var(--radius);padding:10px 12px;text-align:center">
-            <div style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Session</div>
-            <div id="acc-session-pct" style="font-size:22px;font-weight:700">—</div>
-            <div id="acc-session-sub" style="font-size:10px;color:var(--muted);margin-top:2px">— / —</div>
-          </div>
-        </div>
-        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">Slope Prediction</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
-          <div style="background:var(--surface);border-radius:var(--radius);padding:10px 12px;text-align:center">
-            <div style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Lifetime</div>
-            <div id="acc-res-lifetime-pct" style="font-size:22px;font-weight:700">—</div>
-            <div id="acc-res-lifetime-sub" style="font-size:10px;color:var(--muted);margin-top:2px">— / —</div>
-          </div>
-          <div style="background:var(--surface);border-radius:var(--radius);padding:10px 12px;text-align:center">
-            <div style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Session</div>
-            <div id="acc-res-session-pct" style="font-size:22px;font-weight:700">—</div>
-            <div id="acc-res-session-sub" style="font-size:10px;color:var(--muted);margin-top:2px">— / —</div>
+          <div style="background:var(--surface);border-radius:var(--radius);padding:14px 16px;text-align:center">
+            <div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">This Session</div>
+            <div id="acc-session-pct" style="font-size:28px;font-weight:700">—</div>
+            <div id="acc-session-sub" style="font-size:10px;color:var(--muted);margin-top:4px">— / — markets</div>
           </div>
         </div>
 
@@ -392,9 +397,13 @@ body {
               <td style="padding:6px 0;color:var(--muted);font-size:11px">BTC direction</td>
               <td id="sig-btc" style="font-weight:700;text-align:right;padding:6px 0">—</td>
             </tr>
-            <tr>
+            <tr style="border-bottom:1px solid var(--border)">
               <td style="padding:6px 0;color:var(--muted);font-size:11px">Technical bias</td>
               <td id="sig-tech" style="font-weight:700;text-align:right;padding:6px 0">—</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0;color:var(--muted);font-size:11px">CVD pressure</td>
+              <td id="sig-cvd" style="font-weight:700;text-align:right;padding:6px 0">—</td>
             </tr>
           </tbody>
         </table>
@@ -512,42 +521,6 @@ function renderMetrics(s) {
 
   document.getElementById('m-oi').textContent =
     s.open_interest > 0 ? Math.round(s.open_interest).toLocaleString() : '—';
-
-  // Predicted resolution card
-  const predRes  = s.predicted_resolution || 'NEUTRAL';
-  const gbmDir   = s.predicted_direction  || 'NEUTRAL';
-  const gbmRes   = gbmDir === 'UP' ? 'YES' : gbmDir === 'DOWN' ? 'NO' : 'NEUTRAL';
-  const resEl    = document.getElementById('m-res');
-  const resCard  = document.getElementById('m-res-card');
-  const resSubEl = document.getElementById('m-res-sub');
-
-  if (predRes === 'YES') {
-    resEl.textContent = '▲ YES';
-    resEl.style.color = 'var(--green)';
-    resCard.style.borderColor = 'var(--green)';
-  } else if (predRes === 'NO') {
-    resEl.textContent = '▼ NO';
-    resEl.style.color = 'var(--red)';
-    resCard.style.borderColor = 'var(--red)';
-  } else {
-    resEl.textContent = '—';
-    resEl.style.color = 'var(--yellow)';
-    resCard.style.borderColor = 'var(--border)';
-  }
-
-  if (predRes !== 'NEUTRAL' && gbmRes !== 'NEUTRAL') {
-    resSubEl.textContent = predRes === gbmRes ? 'Slope + GBM agree' : '⚠ Slope / GBM conflict';
-    resSubEl.style.color = predRes === gbmRes ? 'var(--green)' : 'var(--yellow)';
-  } else if (predRes !== 'NEUTRAL') {
-    resSubEl.textContent = 'Slope only';
-    resSubEl.style.color = 'var(--muted)';
-  } else if (gbmRes !== 'NEUTRAL') {
-    resSubEl.textContent = 'GBM only: ' + gbmRes;
-    resSubEl.style.color = 'var(--muted)';
-  } else {
-    resSubEl.textContent = 'slope forecast';
-    resSubEl.style.color = 'var(--muted)';
-  }
 }
 
 // ── Market conditions ────────────────────────────────────────────────────────
@@ -589,6 +562,43 @@ function renderMarketConditions(s) {
     const mom = s.momentum_direction || 'neutral';
     momEl.textContent = mom === 'up' ? '▲ UP' : mom === 'down' ? '▼ DOWN' : 'CALM';
     momEl.style.color = mom === 'up' ? 'var(--green)' : mom === 'down' ? 'var(--red)' : 'var(--muted)';
+  }
+
+  // DVOL
+  if (s.dvol > 0) {
+    const dvEl = document.getElementById('dvol-val');
+    dvEl.textContent = s.dvol.toFixed(1) + '%';
+    dvEl.style.color = s.dvol > 80 ? 'var(--red)' : s.dvol > 60 ? 'var(--yellow)' : 'var(--green)';
+    document.getElementById('dvol-label').textContent = s.dvol > 80 ? 'high vol' : s.dvol > 60 ? 'elevated' : 'normal vol';
+  }
+
+  // Basis + Funding
+  if (s.sentiment_fetched) {
+    const basis = s.futures_basis_pct || 0;
+    const basisEl = document.getElementById('basis-val');
+    basisEl.textContent = (basis >= 0 ? '+' : '') + basis.toFixed(3) + '%';
+    basisEl.style.color = basis > 0.05 ? 'var(--green)' : basis < -0.05 ? 'var(--red)' : 'var(--muted)';
+    document.getElementById('basis-label').textContent = basis > 0.05 ? 'contango — bullish lean' : basis < -0.05 ? 'backwardation — bearish lean' : 'neutral';
+
+    const fund = s.funding_rate_pct || 0;
+    const fundEl = document.getElementById('funding-val');
+    fundEl.textContent = (fund >= 0 ? '+' : '') + fund.toFixed(4) + '%';
+    fundEl.style.color = fund > 0.01 ? 'var(--yellow)' : fund < -0.01 ? 'var(--green)' : 'var(--muted)';
+    document.getElementById('funding-label').textContent = fund > 0.01 ? '+ longs paying (crowded)' : fund < -0.01 ? '− shorts paying (bearish)' : 'balanced';
+  }
+
+  // CVD
+  const cvd = s.cvd_window || 0;
+  const cvdTotal = s.cvd_total || 0;
+  const cvdEl = document.getElementById('cvd-val');
+  if (cvdTotal > 0) {
+    const ratio = cvd / cvdTotal;
+    cvdEl.textContent = (cvd >= 0 ? '+' : '') + cvd.toFixed(2) + ' BTC';
+    cvdEl.style.color = ratio > 0.08 ? 'var(--green)' : ratio < -0.08 ? 'var(--red)' : 'var(--muted)';
+    document.getElementById('cvd-label').textContent = (ratio * 100).toFixed(1) + '% net ' + (cvd >= 0 ? 'buying' : 'selling');
+  } else {
+    cvdEl.textContent = '—';
+    cvdEl.style.color = 'var(--muted)';
   }
 
   const left = s.window_seconds_left || 0;
@@ -648,7 +658,7 @@ function renderRecommendation(s) {
   }
 
   if (rec.entry_price != null && side) {
-    entEl.textContent = `Entry: ${rec.entry_price.toFixed(1)}¢   (${rec.signal_count}/3 signals)`;
+    entEl.textContent = `Entry: ${rec.entry_price.toFixed(1)}¢   (${rec.signal_count}/4 signals)`;
     entEl.style.color = 'var(--text)';
     // Warn if outside sweet spot
     const inRange = rec.entry_price >= 60 && rec.entry_price <= 85;
@@ -808,37 +818,21 @@ function renderSparkline(prices) {
 function renderAccuracy(s) {
   function accColor(v) { return v >= 0.6 ? 'var(--green)' : v >= 0.45 ? 'var(--yellow)' : v > 0 ? 'var(--red)' : 'var(--text)'; }
 
-  // GBM Direction — Lifetime
+  // Lifetime
   const lt = s.lifetime_pred_accuracy || 0;
   const ltEl = document.getElementById('acc-lifetime-pct');
   ltEl.textContent = s.lifetime_pred_total > 0 ? (lt * 100).toFixed(1) + '%' : '—';
   ltEl.style.color = accColor(lt);
   document.getElementById('acc-lifetime-sub').textContent =
-    `${s.lifetime_pred_correct || 0} / ${s.lifetime_pred_total || 0}`;
+    `${s.lifetime_pred_correct || 0} / ${s.lifetime_pred_total || 0} markets`;
 
-  // GBM Direction — Session
+  // Session
   const se = s.session_pred_accuracy || 0;
   const seEl = document.getElementById('acc-session-pct');
   seEl.textContent = s.session_pred_total > 0 ? (se * 100).toFixed(1) + '%' : '—';
   seEl.style.color = accColor(se);
   document.getElementById('acc-session-sub').textContent =
-    `${s.session_pred_correct || 0} / ${s.session_pred_total || 0}`;
-
-  // Slope Prediction — Lifetime
-  const rlt = s.lifetime_res_pred_accuracy || 0;
-  const rltEl = document.getElementById('acc-res-lifetime-pct');
-  rltEl.textContent = s.lifetime_res_pred_total > 0 ? (rlt * 100).toFixed(1) + '%' : '—';
-  rltEl.style.color = accColor(rlt);
-  document.getElementById('acc-res-lifetime-sub').textContent =
-    `${s.lifetime_res_pred_correct || 0} / ${s.lifetime_res_pred_total || 0}`;
-
-  // Slope Prediction — Session
-  const rse = s.session_res_pred_accuracy || 0;
-  const rseEl = document.getElementById('acc-res-session-pct');
-  rseEl.textContent = s.session_res_pred_total > 0 ? (rse * 100).toFixed(1) + '%' : '—';
-  rseEl.style.color = accColor(rse);
-  document.getElementById('acc-res-session-sub').textContent =
-    `${s.session_res_pred_correct || 0} / ${s.session_res_pred_total || 0}`;
+    `${s.session_pred_correct || 0} / ${s.session_pred_total || 0} markets`;
 
   // Signal breakdown
   const rec  = s.recommendation || {};
@@ -862,6 +856,16 @@ function renderAccuracy(s) {
   const sigTech = document.getElementById('sig-tech');
   sigTech.textContent = bias.toUpperCase();
   sigTech.style.color = techColor;
+
+  const cvdW = s.cvd_window || 0;
+  const cvdT = s.cvd_total || 0;
+  const cvdRatio = cvdT > 0 ? cvdW / cvdT : 0;
+  const cvdColor = cvdRatio > 0.08 ? 'var(--green)' : cvdRatio < -0.08 ? 'var(--red)' : 'var(--yellow)';
+  const sigCvd = document.getElementById('sig-cvd');
+  sigCvd.textContent = cvdT > 0.5
+    ? (cvdRatio > 0.08 ? '▲ Buying' : cvdRatio < -0.08 ? '▼ Selling' : '~ Neutral') + ` (${(cvdRatio*100).toFixed(1)}%)`
+    : 'No data yet';
+  sigCvd.style.color = cvdT > 0.5 ? cvdColor : 'var(--muted)';
 
   // Recent resolutions from event log
   const logs = (s.event_log || []).filter(l => l.includes('Window closed:'));

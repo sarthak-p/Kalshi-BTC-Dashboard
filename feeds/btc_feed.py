@@ -47,10 +47,14 @@ class BtcFeed:
             open_timeout=15,
         ) as ws:
             await self.state.log_event("BTC price feed connected (Coinbase BTC-USD)")
-            # Subscribe to public ticker channel — no auth required
             await ws.send(json.dumps({
                 "type": "subscribe",
                 "channel": "ticker",
+                "product_ids": ["BTC-USD"],
+            }))
+            await ws.send(json.dumps({
+                "type": "subscribe",
+                "channel": "market_trades",
                 "product_ids": ["BTC-USD"],
             }))
             async for raw in ws:
@@ -58,9 +62,30 @@ class BtcFeed:
                 price = _parse_coinbase_price(msg)
                 if price:
                     await self.state.update_btc(price)
+                trades = _parse_coinbase_trades(msg)
+                for size, is_buy in trades:
+                    await self.state.update_cvd_trade(size, is_buy)
 
 
 # ── Coinbase message parser ───────────────────────────────────────────────────
+
+def _parse_coinbase_trades(msg: dict) -> list[tuple[float, bool]]:
+    """
+    Coinbase Advanced Trade market_trades message shape:
+    {"channel": "market_trades", "events": [{"trades": [{"side": "BUY"/"SELL", "size": "0.01", ...}]}]}
+    Returns list of (size, is_buy) — BUY = buyer hit ask = bullish CVD.
+    """
+    if msg.get("channel") != "market_trades":
+        return []
+    result = []
+    for event in msg.get("events", []):
+        for trade in event.get("trades", []):
+            try:
+                result.append((float(trade["size"]), trade["side"] == "BUY"))
+            except (KeyError, TypeError, ValueError):
+                pass
+    return result
+
 
 def _parse_coinbase_price(msg: dict) -> float | None:
     """

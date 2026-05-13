@@ -6,10 +6,10 @@ Real-time market analysis dashboard for Kalshi BTC 15-minute binary markets. Mon
 
 Each Kalshi `KXBTCD` contract is a binary: pays $1 if BTC closes at or above the window open price, $0 otherwise.
 
-The bot connects to both Kalshi (orderbook + contract metadata) and Coinbase (live BTC price + 1-min candles), then continuously analyzes each 15-minute window using three signals:
+The bot connects to Kalshi (orderbook + contract metadata), Coinbase (live BTC price, 1-min candles, and trade flow), Deribit (implied volatility index), and OKX (futures basis + funding rate), then continuously analyzes each 15-minute window using four signals:
 
 **1. GBM Fair Value**
-Uses a Geometric Brownian Motion model to estimate the probability that BTC closes above the window-open strike. Inputs: current BTC price, strike, time remaining, and a rolling 10-minute realized volatility. Output: `fair_value_yes_pct` (0–100). Updates every 50ms.
+Uses a Geometric Brownian Motion model to estimate the probability that BTC closes above the window-open strike. Inputs: current BTC price, strike, time remaining, and **Deribit DVOL** (implied volatility index — more stable than realized vol). Output: `fair_value_yes_pct` (0–100). Updates every 50ms. Falls back to 10-minute rolling realized vol if DVOL is unavailable.
 
 **2. BTC Momentum**
 Measures the dollar move from the window open. If `|move| >= MOMENTUM_ENTRY_USD` ($30 default), it contributes a directional signal.
@@ -26,26 +26,40 @@ Fetches 50 one-minute candles from Coinbase Exchange and computes:
 
 Two or more points in the same direction → bias. Requires 2 signals to avoid single-indicator noise.
 
-**Recommendation**
-When 2 or 3 signals agree on a direction, the dashboard shows: side (YES/NO), entry price (best ask or implied NO ask), confidence (signal_count / 3), and the basis for each signal.
+**4. CVD — Cumulative Volume Delta (Coinbase trade stream)**
+Tracks every Coinbase spot trade during the window. Buyer-initiated trades (hitting the ask) add to CVD; seller-initiated trades (hitting the bid) subtract. If net buying exceeds 8% of total window volume → bullish signal. If net selling exceeds 8% → bearish signal. Resets at each new window open.
 
-**Predicted Resolution**
-Separate from the trade recommendation, the dashboard shows a dedicated **Predicted Resolution** (YES/NO) card. This is a slope-based forecast: the analyzer extrapolates BTC price using the 90s and 300s linear slopes and projects where BTC will be at window close. If `predicted_btc_close > btc_open` → predicted YES; if below → predicted NO.
+CVD distinguishes real buying pressure from price drift. A BTC rally with negative CVD (sellers absorbing it) is a weaker setup than one where buyers are aggressively lifting.
 
-This is intentionally distinct from the recommendation:
-- The **recommendation** requires 2/3 signals agreeing and is a *trade signal*.
-- The **predicted resolution** is simply the model's best guess at the actual outcome — useful when the signal count is only 1 and no recommendation fires.
+**Recommendation — the one signal to act on**
+Requires **3 of 4 signals** to agree (or 2 with zero opposition) before firing `BUY YES` or `BUY NO`. Shows: side, entry price (best ask or implied NO ask), signal count (X/4), and the reason each signal voted.
 
-The card also flags whether the slope and GBM model agree (`Slope + GBM agree`) or conflict (`⚠ Slope / GBM conflict`), giving a quick read on conviction.
+**Only enter when the Recommendation fires AND the phase shows `ENTRY OPEN`.** During `MONITORING` (> 8 min left) the signals are forming — do not act. During `TOO LATE` (< 2 min) it's too late to enter with meaningful upside.
+
+**Market Context (informational, not in the vote)**
+Refreshed every 60s alongside technicals:
+- **DVOL** — Deribit BTC implied vol index. Lower = calmer market, higher = wider expected swings. Used as GBM sigma input.
+- **Futures Basis** — OKX perp mark price vs. index price. Positive (contango) = leveraged market leaning bullish. Negative (backwardation) = leaning bearish.
+- **Funding Rate** — OKX perp funding. Positive = longs paying shorts (market crowded long, slight bearish lean). Negative = shorts paying longs (bearish crowding, slight bullish lean).
 
 **Monitoring conditions tracked**
-The dashboard also continuously checks the analysis preconditions that would apply to a discretionary entry:
+The Analysis Conditions panel shows the entry preconditions in real time:
 - `btc_move_ok` — BTC has moved ≥ $30 from the window open
-- `price_in_range` — Kalshi mid is 60–85¢ (confirmed direction, room to run)
+- `price_in_range` — entry price is 60–85¢ (confirmed direction, room to run)
 - `crossings_ok` — Kalshi mid has crossed 50¢ ≤ 2 times (steady, not choppy)
 - `direction_ok` — ≥60% of recent Kalshi mid steps moved further from 50¢
-- `bias_ok` — RSI/BB technicals agree with direction
+- `bias_ok` — RSI/BB technicals agree with BTC direction
 - `phase` — `monitoring` (> 8 min left) / `entry_open` (2–8 min) / `too_late` / `closing`
+
+## How to use it
+
+1. Open the dashboard at `http://127.0.0.1:8000` once the bot is running.
+2. Watch the **Window Phase** in Market Conditions. Do nothing during `MONITORING`.
+3. When phase flips to **ENTRY OPEN**, look at the **Recommendation** box.
+   - `BUY YES` or `BUY NO` with 3/4 or 4/4 signals → enter that side.
+   - `WAIT` → signals are split, skip this window.
+4. Optional confirmation: glance at **CVD**. If it agrees with the recommendation (green for YES, red for NO), setup is stronger. If it conflicts, it's a weaker signal.
+5. After entering, stop watching. The signals will keep updating — that's noise once you're in. Check the resolution after window close.
 
 ## Quick Start
 
@@ -83,18 +97,9 @@ The Kalshi credentials are needed only for orderbook data. No orders are placed.
 
 At each window close the bot queries `GET /markets/{ticker}` on the Kalshi REST API for the official settlement result. Kalshi resolves using CF Benchmarks' Bitcoin Real Time Index (BRTI) — averaged over the 60 seconds before close — not Coinbase spot price. With `settlement_timer_seconds=1`, the result is typically available within seconds of close.
 
-The bot polls every 5 seconds for up to 2 minutes. If Kalshi doesn't return a result in that window (network failure, etc.), it falls back to estimating from the live Coinbase price. Each logged resolution is tagged `[Kalshi]` or `[estimated]` so you know which source was used.
+The bot polls every 5 seconds for up to 2 minutes. If Kalshi doesn't return a result in that window, it falls back to estimating from the live Coinbase price. Each logged resolution is tagged `[Kalshi]` or `[estimated]`.
 
-Prediction outcomes (and accuracy stats) are persisted in `logs/predictions.csv` across sessions, and lifetime counts are stored in `logs/lifetime_stats.json`.
-
-Two accuracy metrics are tracked independently:
-
-| Metric | What it measures | Keys in `lifetime_stats.json` |
-|---|---|---|
-| GBM Direction | Whether `predicted_direction` (UP/DOWN from GBM %) matched the actual resolution | `pred_total`, `pred_correct` |
-| Slope Prediction | Whether `predicted_resolution` (YES/NO from price-slope extrapolation) matched the actual resolution | `res_pred_total`, `res_pred_correct` |
-
-Both are shown side-by-side in the dashboard's Prediction Accuracy panel (lifetime and session), and logged per-market in `predictions.csv` as `predicted_resolution` and `resolution_pred_correct`.
+Prediction outcomes are persisted in `logs/predictions.csv` across sessions, and lifetime accuracy counts in `logs/lifetime_stats.json` (`pred_total`, `pred_correct`).
 
 ## Architecture
 
@@ -103,10 +108,10 @@ main.py
   → EventLogger.flush_loop()       async CSV flush every 5s
   → StateManager.broadcast_loop()  WebSocket push to dashboard
   → KalshiFeed.run()               REST contract discovery + WS orderbook
-  → BtcFeed.run()                  Coinbase BTC-USD reference price (WS)
+  → BtcFeed.run()                  Coinbase BTC-USD price (WS ticker) + CVD (WS trades)
   → Analyzer.run()
-      _analysis_loop()             GBM model + analysis conditions (every 50ms)
-      _bias_refresher()            Coinbase candle fetch + RSI/BB (every 60s)
+      _analysis_loop()             GBM model + 4-signal recommendation (every 50ms)
+      _bias_refresher()            RSI/BB + Deribit DVOL + OKX basis/funding (every 60s)
       _window_resolver()           logs resolution vs. prediction (every 1s)
   → FastAPI/Uvicorn                dashboard server + WS broadcast
 ```
@@ -130,7 +135,7 @@ At contract discovery the bot resolves the strike in priority order:
 | `KALSHI_API_KEY_ID` | empty | Kalshi API key ID |
 | `KALSHI_PRIVATE_KEY_B64` | empty | Base64-encoded PEM private key |
 | `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract auto-discovery |
-| `BTC_SIGMA` | `0.80` | Fallback annualized volatility for GBM model (0–2.5) |
+| `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
 | `MAX_ENTRY_WINDOW_S` | `480` | Phase switches to `entry_open` when ≤ this many seconds remain |
 | `MIN_ENTRY_WINDOW_S` | `120` | Phase switches to `too_late` when < this many seconds remain |
 | `MIN_ENTRY_PRICE_CENTS` | `60` | Lower bound of the "in-range" price check (¢) |
@@ -155,9 +160,9 @@ main.py                      asyncio entry point
 config.py                    settings (reads .env)
 state/state_manager.py       shared in-memory hub, dataclasses, WebSocket broadcast
 feeds/kalshi_ws.py           Kalshi REST/WS feed, auth, contract discovery, orderbook
-feeds/btc_feed.py            Coinbase BTC-USD live price (WebSocket)
-strategy/scalper.py          Analyzer: GBM model, recommendation, window resolver
-strategy/technicals.py       Coinbase candle fetch, RSI / ADX / BB computation
+feeds/btc_feed.py            Coinbase BTC-USD price + CVD from trade stream (WebSocket)
+strategy/scalper.py          Analyzer: GBM model, 4-signal recommendation, window resolver
+strategy/technicals.py       RSI/BB (Coinbase), DVOL (Deribit), basis/funding (OKX)
 logger/event_logger.py       in-memory event buffer and async CSV flush
 dashboard/app.py             FastAPI routes and WebSocket broadcast
 dashboard/static/index.html  browser dashboard
@@ -169,6 +174,7 @@ logs/lifetime_stats.json     persisted prediction accuracy counters
 ## Notes
 
 - **No execution.** The bot is a read-only analysis tool. It subscribes to Kalshi's orderbook and Coinbase's price feed but never submits orders.
-- **Resolution accuracy.** The bot queries Kalshi's settlement API for the official outcome (CF Benchmarks BRTI, not Coinbase spot). If the API call fails, it falls back to a Coinbase-price estimate and tags the log entry `[estimated]`.
-- **GBM is a model.** The fair-value estimate assumes log-normal price diffusion with realized vol from the last 10 minutes. It will misprice during trend continuation and low-vol regimes.
+- **Resolution accuracy.** The bot queries Kalshi's settlement API for the official outcome (CF Benchmarks BRTI, not Coinbase spot). If the API call fails, it falls back to a Coinbase-price estimate.
+- **GBM sigma source.** The model uses Deribit DVOL (implied vol) as sigma when available — it's more stable than 10-minute realized vol from tick data. Falls back to rolling realized vol if the Deribit fetch fails.
+- **External data sources.** DVOL is from Deribit's public API (no auth). Basis and funding rate are from OKX's public API (no auth). Binance and Bybit are geo-blocked in the US.
 - **Fees.** Kalshi taker fees use the formula 7% × p × (1-p) per side, where p is contract price. At 60–85¢ entry range, round-trip taker cost is ~2–3.4¢ per contract. Maker (limit) orders are ~75% cheaper. Factor this into any profitability analysis.
