@@ -76,28 +76,29 @@ class Executor:
         if contract in self._traded:
             return
 
+        # An edge gate (commitment rate, GBM gap, price cap) explicitly blocked this
+        # recommendation. The 60-second lock may have restored the display side, but the
+        # underlying condition that blocked it is still active — don't trade.
+        if rec.get("edge_gate_blocked"):
+            return
+
+        # Require the signal to have been stable for at least 30 seconds before trading.
+        # This prevents entering on a single-tick spike (e.g. a dead-cat bounce to 95% GBM).
+        lock_ts = getattr(self.state, "recommendation_lock_ts", 0.0)
+        if time.time() - lock_ts < 30.0:
+            return
+
         side       = rec["side"]
         sizing     = rec.get("sizing", {})
         contracts  = sizing.get("contracts", 0)
         fill_price = rec.get("entry_price")
 
-        # Edge gate cleared entry_price but lock restored the side for display.
-        # Grab a fresh price from the current orderbook instead.
-        if fill_price is None:
-            ob = self.state.orderbook
-            if side == "YES":
-                fill_price = ob.best_ask()
-            else:
-                bb = ob.best_bid()
-                fill_price = (100.0 - bb) if bb is not None else None
-
         if fill_price is None:
             await self.state.log_event(
-                f"⚠ No trade ({side}): orderbook empty — no price available"
+                f"⚠ No trade ({side}): recommendation has no entry price"
             )
             return
 
-        # Kelly was computed with a stale/zero price if edge gates blocked; recompute.
         if contracts <= 0:
             from strategy.scalper import _kelly_position_size
             sizing = _kelly_position_size(
@@ -130,10 +131,14 @@ class Executor:
         can immediately re-enter in the opposite direction if edge conditions allow.
 
         Guards:
-          - GBM must strongly oppose the position (≤15% for YES, ≥85% for NO)
+          - GBM must oppose the position (≤35% for YES, ≥65% for NO)
           - ≥180 s must remain — too late to act in the last 3 min
           - Sell price must be ≥8¢ — don't sell for scraps into a one-sided book
           - One stop-loss per contract per session
+
+        Threshold is ≤35%/≥65% (not ≤15%/≥85%) so we exit while the sell price
+        is still reasonable (~30-35¢) rather than waiting until the market has
+        fully repriced to 85%+ and we can only recover 10-13¢.
         """
         pos = self.state.position
         if pos["status"] != "open":
@@ -149,11 +154,11 @@ class Executor:
 
         fv   = self.state.prediction_yes_pct
         side = pos["side"]
-        gbm_strongly_opposes = (
-            (side == "YES" and fv <= 15.0) or
-            (side == "NO"  and fv >= 85.0)
+        gbm_opposes = (
+            (side == "YES" and fv <= 35.0) or
+            (side == "NO"  and fv >= 65.0)
         )
-        if not gbm_strongly_opposes:
+        if not gbm_opposes:
             return
 
         ob = self.state.orderbook

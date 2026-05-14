@@ -223,6 +223,7 @@ def _compute_recommendation(
     max_entry_price_cents: float = 65.0,
 ) -> dict:
     basis = []
+    edge_gate_blocked = False  # set True if any hard edge gate fires — executor must not trade
 
     if fv > 58:
         model_side = "YES"
@@ -342,6 +343,7 @@ def _compute_recommendation(
             )
             side = None
             entry_price = None
+            edge_gate_blocked = True
 
     # ── Edge gate 2: GBM vs market gap ───────────────────────────────────────
     # Only trade when our GBM probability meaningfully disagrees with what
@@ -357,6 +359,7 @@ def _compute_recommendation(
                 )
                 side = None
                 entry_price = None
+                edge_gate_blocked = True
             elif side == "NO" and -gap < min_gbm_market_gap_cents:
                 basis.append(
                     f"⛔ No edge: GBM {fv:.0f}¢ vs market {kalshi_mid_price:.0f}¢ "
@@ -364,6 +367,7 @@ def _compute_recommendation(
                 )
                 side = None
                 entry_price = None
+                edge_gate_blocked = True
 
     # ── Edge gate 3: entry price range ───────────────────────────────────────
     # Refuse trades where risk/reward is inverted. At 75¢ you risk 75¢ to win
@@ -384,6 +388,7 @@ def _compute_recommendation(
             )
             side = None
             entry_price = None
+            edge_gate_blocked = True
 
     # Add bankroll and accuracy as parameters passed in from analyzer
     sizing = _kelly_position_size(
@@ -399,6 +404,7 @@ def _compute_recommendation(
         "signal_count": max(yes_count, no_count),
         "basis": basis,
         "sizing": sizing,
+        "edge_gate_blocked": edge_gate_blocked,
     }
 
 class Analyzer:
@@ -555,10 +561,11 @@ class Analyzer:
             self.state._last_locked_contract = self.state.active_contract
             locked = None
 
-        # GBM is considered strongly opposing if it's pinned at the 5% floor against the lock.
+        # Break the 60-second flip lock early when GBM crosses the stop-loss threshold —
+        # same ≤35%/≥65% boundary used by the executor so display and execution stay aligned.
         gbm_strongly_opposes = (
-            (locked == "YES" and fv <= 10.0) or
-            (locked == "NO"  and fv >= 90.0)
+            (locked == "YES" and fv <= 35.0) or
+            (locked == "NO"  and fv >= 65.0)
         )
 
         if current_side is not None:

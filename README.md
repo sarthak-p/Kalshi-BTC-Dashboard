@@ -57,7 +57,7 @@ The bot votes across seven signals. Four are **core votes**; three are **confirm
 
 All conditions must be true simultaneously on the same analysis tick (runs every 50 ms):
 
-1. Phase is **`entry_open`** — between 240 s and 600 s remaining (4–10 min before close)
+1. Phase is **`entry_open`** — between 240 s and 900 s remaining (4–15 min before close)
 2. The 4-signal vote produces a clear side (YES or NO)
 3. Commitment rate filter passes (`|move| / tau ≥ 0.15 $/s`)
 4. GBM-market gap filter passes (`|fv − mid| ≥ 8¢`)
@@ -82,9 +82,11 @@ Because positions cannot be exited freely on Kalshi, the bot monitors open posit
 | Guard | Threshold |
 |-------|-----------|
 | Position is open | status == open |
-| GBM strongly opposes | ≤ 15% YES for a YES position; ≥ 85% YES for a NO position |
+| GBM opposes | ≤ 35% YES for a YES position; ≥ 65% YES for a NO position |
 | Time remaining | ≥ 180 s (3 min) — not worth the spread cost with less time |
 | Sell price floor | ≥ 8¢ — don't exit into a one-sided book for scraps |
+
+The 35%/65% threshold (not 15%/85%) ensures the stop-loss fires while the sell price is still ~30–35¢, not after the market has fully repriced to 85%+ leaving only 10–13¢ to recover.
 
 One stop-loss is allowed per contract per session. After a stop-loss, the trade lock is cleared and the bot can immediately re-enter in the opposite direction — but only if the opposite trade passes all the same edge filters (commitment rate, GBM gap, price cap, Kelly sizing).
 
@@ -194,7 +196,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Min gap between GBM fair value and Kalshi mid — ensures a real mispricing edge |
 | `MIN_ENTRY_PRICE_CENTS` | `8.0` | Hard lower bound on entry price — below this the market is near-certain |
 | `MAX_ENTRY_PRICE_CENTS` | `65.0` | Hard upper bound — above this you risk more than you can win |
-| `MAX_ENTRY_WINDOW_S` | `600.0` | Entry window opens when ≤ this many seconds remain |
+| `MAX_ENTRY_WINDOW_S` | `900.0` | Entry window opens when ≤ this many seconds remain |
 | `MIN_ENTRY_WINDOW_S` | `240.0` | Entry window closes when < this many seconds remain |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |

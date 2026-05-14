@@ -158,8 +158,9 @@ class StateManager:
             "side": None,        # "YES" | "NO" | None
             "entry_price": None,
             "confidence": 0.0,
-            "signal_count": 0,   # how many of 3 indicators agree
+            "signal_count": 0,
             "basis": [],
+            "edge_gate_blocked": False,
         }
 
         # Prediction accuracy (persisted across sessions)
