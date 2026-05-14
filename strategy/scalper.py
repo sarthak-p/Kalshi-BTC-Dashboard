@@ -219,6 +219,8 @@ def _compute_recommendation(
     tau_seconds: float = 0.0,
     min_commitment_rate: float = 0.20,
     min_gbm_market_gap_cents: float = 8.0,
+    min_entry_price_cents: float = 8.0,
+    max_entry_price_cents: float = 65.0,
 ) -> dict:
     basis = []
 
@@ -314,21 +316,13 @@ def _compute_recommendation(
     elif no_count > yes_count:
         no_count += sum(1 for s in bonus if s == "NO")
 
-    # With 4 signals: require clear majority (3+ OR 2 with no opposition)
+    # Require 3+ signals aligned; in choppy markets (ADX < 20) all 4 must agree
     min_signals = 4 if adx < 20 else 3
 
-    # In choppy markets require 3 signals; in trending markets 2 is enough
-    if yes_count >= 3 and yes_count > no_count:
+    if yes_count >= min_signals and yes_count > no_count:
         side = "YES"
         entry_price = ob.best_ask()
-    elif no_count >= 3 and no_count > yes_count:
-        side = "NO"
-        bb = ob.best_bid()
-        entry_price = (100.0 - bb) if bb is not None else None
-    elif yes_count >= min_signals and no_count <= 1:
-        side = "YES"
-        entry_price = ob.best_ask()
-    elif no_count >= min_signals and yes_count <= 1:
+    elif no_count >= min_signals and no_count > yes_count:
         side = "NO"
         bb = ob.best_bid()
         entry_price = (100.0 - bb) if bb is not None else None
@@ -371,6 +365,26 @@ def _compute_recommendation(
                 side = None
                 entry_price = None
 
+    # ── Edge gate 3: entry price range ───────────────────────────────────────
+    # Refuse trades where risk/reward is inverted. At 75¢ you risk 75¢ to win
+    # 25¢ — one reversal wipes 3x the potential gain. Sweet spot is 8–65¢
+    # where you're getting paid meaningfully to take the risk.
+    if side is not None and entry_price is not None:
+        if entry_price < min_entry_price_cents:
+            basis.append(
+                f"⛔ Entry {entry_price:.1f}¢ too cheap (min {min_entry_price_cents:.0f}¢) "
+                f"— market is near-certain, fighting strong consensus"
+            )
+            side = None
+            entry_price = None
+        elif entry_price > max_entry_price_cents:
+            basis.append(
+                f"⛔ Entry {entry_price:.1f}¢ too expensive (max {max_entry_price_cents:.0f}¢) "
+                f"— risk {entry_price:.0f}¢ to win only {100 - entry_price:.0f}¢"
+            )
+            side = None
+            entry_price = None
+
     # Add bankroll and accuracy as parameters passed in from analyzer
     sizing = _kelly_position_size(
         bankroll=bankroll,
@@ -388,10 +402,11 @@ def _compute_recommendation(
     }
 
 class Analyzer:
-    def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger):
-        self.state = state
-        self.cfg = cfg
-        self.logger = logger
+    def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
+        self.state    = state
+        self.cfg      = cfg
+        self.logger   = logger
+        self.executor = executor
 
     async def run(self) -> None:
         await asyncio.gather(
@@ -486,15 +501,6 @@ class Analyzer:
             else:
                 direction_ok = True  # price deeply committed, check skipped
 
-        # Bias check
-        bias_dir = self.state.pre_window_bias
-        if bias_dir == "neutral":
-            bias_ok = None
-        elif (side == "yes" and bias_dir == "up") or (side == "no" and bias_dir == "down"):
-            bias_ok = True
-        else:
-            bias_ok = False
-
         # Write analysis conditions (direct write — sole writer)
         self.state.analysis.update({
             "phase": phase,
@@ -506,26 +512,27 @@ class Analyzer:
             "crossings_ok": crossings_ok,
             "direction_score": direction_score,
             "direction_ok": direction_ok,
-            "bias_ok": bias_ok,
         })
 
         # Recommendation (direct write)
         self.state.recommendation = _compute_recommendation(
             fv=fv,
             btc_change=btc_change,
-            bias=bias_dir,
+            bias=self.state.pre_window_bias,
             ob=ob,
             momentum_usd=self.cfg.momentum_entry_usd,
             cvd_window=self.state.cvd_window,
             cvd_total=self.state.cvd_total,
             adx=self.state.tech_adx,
-            bankroll=self.state.bankroll,
+            bankroll=self.state.executor_bankroll,
             session_accuracy=self.state._pred_accuracy(lifetime=False) or 0.91,
             funding_pct=self.state.funding_rate_pct,
             kalshi_mid_history=list(self.state.kalshi_mid_history),
             tau_seconds=tau_seconds,
             min_commitment_rate=self.cfg.min_commitment_rate,
             min_gbm_market_gap_cents=self.cfg.min_gbm_market_gap_cents,
+            min_entry_price_cents=self.cfg.min_entry_price_cents,
+            max_entry_price_cents=self.cfg.max_entry_price_cents,
         )
 
         if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
@@ -582,6 +589,10 @@ class Analyzer:
                 "signal_count": self.state.recommendation["signal_count"],
                 "basis": self.state.recommendation["basis"],
             })
+
+        if self.executor:
+            await self.executor.maybe_stop_loss()
+            await self.executor.maybe_trade()
 
         self.state._dirty.set()
 
@@ -690,6 +701,12 @@ class Analyzer:
             resolved_yes = btc_at_close >= btc_open if btc_open > 0 else None
             resolution = "YES" if resolved_yes else "NO" if resolved_yes is not None else "?"
             result_source = "estimated"
+
+        # Settle any open executor position for this window, then re-sync balance
+        if resolution in ("YES", "NO"):
+            await self.state.settle_position(ticker, resolution)
+            if self.executor:
+                await self.executor.sync_balance()
 
         btc_chg = btc_at_close - btc_open if btc_open > 0 else 0.0
         chg_sign = "+" if btc_chg >= 0 else ""

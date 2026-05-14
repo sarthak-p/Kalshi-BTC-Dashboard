@@ -150,6 +150,7 @@ body {
     <span class="dot-label">KALSHI</span>
   </div>
   <span id="velocity-badge">⚡ VELOCITY PAUSE</span>
+  <span id="trading-mode-badge" style="padding:3px 10px;border-radius:12px;font-size:10px;font-weight:700;letter-spacing:1px;background:rgba(245,158,11,.15);color:var(--yellow)">PAPER</span>
   <span id="session-uptime">UP 0s</span>
 </div>
 
@@ -184,30 +185,58 @@ body {
     </div>
   </div>
 
-  <!-- Bankroll panel -->
+  <!-- Model bankroll (prediction accuracy tracking) -->
   <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
     <div class="metric-card">
-      <div class="metric-label">Balance</div>
+      <div class="metric-label">Model Balance</div>
       <div class="metric-value" id="bk-balance">—</div>
       <div class="metric-sub" id="bk-balance-sub">starting $250</div>
     </div>
-
     <div class="metric-card">
-      <div class="metric-label">Session P&L</div>
+      <div class="metric-label">Model P&L</div>
       <div class="metric-value" id="bk-session-pnl">—</div>
       <div class="metric-sub">this session</div>
     </div>
-
     <div class="metric-card">
-      <div class="metric-label">Last Trade</div>
+      <div class="metric-label">Last Model Trade</div>
       <div class="metric-value" id="bk-last-pnl">—</div>
       <div class="metric-sub" id="bk-last-bet">—</div>
     </div>
-
     <div class="metric-card" style="border-color:var(--accent)">
       <div class="metric-label">Next Bet (Kelly)</div>
       <div class="metric-value" id="bk-next-bet">—</div>
       <div class="metric-sub" id="bk-next-detail">—</div>
+    </div>
+  </div>
+
+  <!-- Bot executor panel -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Bot Executor</span>
+      <span id="exec-mode-badge" style="font-size:10px;font-weight:700;letter-spacing:1px;padding:2px 10px;border-radius:12px;background:rgba(245,158,11,.15);color:var(--yellow)">PAPER</span>
+    </div>
+    <div class="panel-body">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+
+        <div class="metric-card">
+          <div class="metric-label">Bot Balance</div>
+          <div class="metric-value" id="exec-balance">—</div>
+          <div class="metric-sub" id="exec-balance-sub">—</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Bot Session P&L</div>
+          <div class="metric-value" id="exec-session-pnl">—</div>
+          <div class="metric-sub">trades this session</div>
+        </div>
+
+        <div class="metric-card" style="grid-column:span 2">
+          <div class="metric-label">Current Position</div>
+          <div class="metric-value" style="font-size:16px" id="exec-position">—</div>
+          <div class="metric-sub" id="exec-position-sub">no position this window</div>
+        </div>
+
+      </div>
     </div>
   </div>
 
@@ -457,6 +486,70 @@ function render(s) {
   renderAccuracy(s);
   renderEventLog(s);
   renderBankroll(s);
+  renderExecutor(s);
+}
+
+// ── Executor panel ─────────────────────────────────────────────────────────
+function renderExecutor(s) {
+  const pos     = s.position || {};
+  const mode    = s.trading_mode || 'paper';
+  const execBal = s.executor_bankroll != null ? s.executor_bankroll : 250;
+  const execPnl = s.executor_session_pnl || 0;
+
+  // Mode badges (top bar + panel header)
+  const isLive = mode === 'live';
+  const modeStyle = isLive
+    ? { bg: 'rgba(16,185,129,.15)', color: 'var(--green)', label: 'LIVE' }
+    : { bg: 'rgba(245,158,11,.15)', color: 'var(--yellow)', label: 'PAPER' };
+  ['trading-mode-badge', 'exec-mode-badge'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = modeStyle.label;
+    el.style.background = modeStyle.bg;
+    el.style.color = modeStyle.color;
+  });
+
+  // Bot balance
+  const balEl = document.getElementById('exec-balance');
+  if (balEl) {
+    balEl.textContent = '$' + execBal.toFixed(2);
+    balEl.style.color = execBal >= 250 ? 'var(--green)' : 'var(--red)';
+    const diff = execBal - 250;
+    document.getElementById('exec-balance-sub').textContent =
+      (diff >= 0 ? '+' : '') + '$' + diff.toFixed(2) + ' all-time';
+  }
+
+  // Bot session P&L
+  const pnlEl = document.getElementById('exec-session-pnl');
+  if (pnlEl) {
+    pnlEl.textContent = (execPnl >= 0 ? '+' : '') + '$' + execPnl.toFixed(2);
+    pnlEl.style.color = execPnl > 0 ? 'var(--green)' : execPnl < 0 ? 'var(--red)' : 'var(--muted)';
+  }
+
+  // Current position
+  const posEl    = document.getElementById('exec-position');
+  const posSubEl = document.getElementById('exec-position-sub');
+  if (!posEl) return;
+  const status = pos.status || 'none';
+  const modeIcon = pos.mode === 'live' ? '🟢' : '📄';
+
+  if (status === 'none') {
+    posEl.textContent = '—';
+    posEl.style.color = 'var(--muted)';
+    posSubEl.textContent = 'no position this window';
+  } else if (status === 'open') {
+    posEl.textContent = modeIcon + ' ' + pos.side + '  ' + pos.contracts + ' contracts @ ' + (pos.fill_price || 0).toFixed(1) + '¢';
+    posEl.style.color = pos.side === 'YES' ? 'var(--green)' : 'var(--red)';
+    posSubEl.textContent = 'cost $' + (pos.cost || 0).toFixed(2) + '  ·  waiting for settlement';
+  } else if (status === 'won') {
+    posEl.textContent = '✓  WON  +$' + (pos.pnl || 0).toFixed(2);
+    posEl.style.color = 'var(--green)';
+    posSubEl.textContent = pos.side + '  ' + pos.contracts + ' contracts @ ' + (pos.fill_price || 0).toFixed(1) + '¢';
+  } else if (status === 'lost') {
+    posEl.textContent = '✗  LOST  $' + Math.abs(pos.pnl || 0).toFixed(2);
+    posEl.style.color = 'var(--red)';
+    posSubEl.textContent = pos.side + '  ' + pos.contracts + ' contracts @ ' + (pos.fill_price || 0).toFixed(1) + '¢';
+  }
 }
 
 // ── Top bar ────────────────────────────────────────────────────────────────

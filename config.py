@@ -8,6 +8,11 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# ── Trading mode ─────────────────────────────────────────────────────────────
+# Change TRADING_MODE in .env to switch between paper and live.
+# paper = simulated fills, no real orders placed
+# live  = real orders via Kalshi REST API — uses real money
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -59,12 +64,10 @@ class Settings(BaseSettings):
     # ── "Away from the line" indicators ──────────────────────────────────────
     max_line_crossings: int = Field(default=2, env="MAX_LINE_CROSSINGS")
     min_direction_consistency: float = Field(default=0.6, env="MIN_DIRECTION_CONSISTENCY")
-    kalshi_mid_max_range_cents: float = Field(default=22.0, env="KALSHI_MID_MAX_RANGE_CENTS")
 
     # ── Pre-window technical analysis ─────────────────────────────────────────
     binance_symbol: str = Field(default="BTC-USD", env="BINANCE_SYMBOL")
     binance_klines_interval: str = Field(default="60", env="BINANCE_KLINES_INTERVAL")
-    bias_gate_enabled: bool = Field(default=True, env="BIAS_GATE_ENABLED")
 
     # ── Dashboard ────────────────────────────────────────────────────────────
     dashboard_host: str = Field(default="127.0.0.1", env="DASHBOARD_HOST")
@@ -75,6 +78,9 @@ class Settings(BaseSettings):
     kalshi_ws_base: str = Field(default="", env="KALSHI_WS_BASE")
 
     bankroll: float = Field(default=250.0, env="BANKROLL")
+
+    # ── Executor ─────────────────────────────────────────────────────────────
+    trading_mode: Literal["paper", "live"] = Field(default="paper", env="TRADING_MODE")
 
     def model_post_init(self, __context) -> None:
         host = "demo-api.kalshi.com" if self.kalshi_env == "demo" else "api.elections.kalshi.com"

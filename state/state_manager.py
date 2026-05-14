@@ -10,8 +10,9 @@ from typing import Optional
 
 from fastapi import WebSocket
 
-_STATS_FILE = Path("logs/lifetime_stats.json")
-_BANKROLL_FILE = Path("logs/bankroll.json")
+_STATS_FILE            = Path("logs/lifetime_stats.json")
+_BANKROLL_FILE         = Path("logs/bankroll.json")
+_EXECUTOR_BANKROLL_FILE = Path("logs/executor_bankroll.json")
 
 def _load_pred_stats() -> tuple[int, int, int, int]:
     try:
@@ -79,7 +80,12 @@ class Orderbook:
         return (bid_vol - ask_vol) / total  # +1 = all bids, -1 = all asks
 
 class StateManager:
-    def __init__(self, momentum_threshold_usd: float = 150.0, starting_bankroll: float = 250.0):
+    def __init__(
+        self,
+        momentum_threshold_usd: float = 150.0,
+        starting_bankroll: float = 250.0,
+        trading_mode: str = "paper",
+    ):
         # Feed state
         self.btc_price: float = 0.0
         self.btc_history: deque[tuple[float, float]] = deque(maxlen=6000)
@@ -145,7 +151,6 @@ class StateManager:
             "crossings_ok": None,
             "direction_score": None,
             "direction_ok": None,
-            "bias_ok": None,
         }
 
         # Recommendation (written directly by analyzer)
@@ -173,6 +178,22 @@ class StateManager:
         self.last_bet: float = 0.0
         self.last_pnl: float = 0.0
         self.session_pnl: float = 0.0
+
+        # Executor position (one per window)
+        self.trading_mode: str = trading_mode
+        self.position: dict = {
+            "ticker":     None,
+            "side":       None,
+            "contracts":  0,
+            "fill_price": None,
+            "cost":       0.0,
+            "status":     "none",   # none | open | won | lost
+            "mode":       None,     # paper | live
+            "pnl":        None,
+        }
+        # Separate P&L for executor trades (paper or live)
+        self.executor_bankroll: float = self._load_executor_bankroll(default=starting_bankroll)
+        self.executor_session_pnl: float = 0.0
 
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
@@ -304,6 +325,65 @@ class StateManager:
             _BANKROLL_FILE.write_text(json.dumps({"bankroll": round(self.bankroll, 2)}))
         except Exception:
             pass
+
+    def _load_executor_bankroll(self, default: float) -> float:
+        try:
+            return float(json.loads(_EXECUTOR_BANKROLL_FILE.read_text())["bankroll"])
+        except Exception:
+            return default
+
+    def _save_executor_bankroll(self) -> None:
+        try:
+            _EXECUTOR_BANKROLL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _EXECUTOR_BANKROLL_FILE.write_text(json.dumps({"bankroll": round(self.executor_bankroll, 2)}))
+        except Exception:
+            pass
+
+    async def open_position(
+        self, ticker: str, side: str, contracts: int, fill_price: float, mode: str
+    ) -> None:
+        async with self._lock:
+            self.position = {
+                "ticker":     ticker,
+                "side":       side,
+                "contracts":  contracts,
+                "fill_price": round(fill_price, 1),
+                "cost":       round(contracts * fill_price / 100.0, 2),
+                "status":     "open",
+                "mode":       mode,
+                "pnl":        None,
+            }
+        self._dirty.set()
+
+    async def settle_position(self, ticker: str, resolution: str) -> None:
+        """Called by _settle_window with the official YES/NO resolution."""
+        async with self._lock:
+            pos = self.position
+            if pos["status"] != "open" or pos["ticker"] != ticker:
+                return
+            won = pos["side"] == resolution
+            pnl = round(pos["contracts"] - pos["cost"], 2) if won else round(-pos["cost"], 2)
+            pos["status"] = "won" if won else "lost"
+            pos["pnl"]    = pnl
+            self.executor_bankroll     = round(self.executor_bankroll + pnl, 2)
+            self.executor_session_pnl  = round(self.executor_session_pnl + pnl, 2)
+            self._save_executor_bankroll()
+        self._dirty.set()
+
+    async def stop_position(self, ticker: str, sell_price: float) -> None:
+        """Stop-loss: sell an open position at the current market price mid-window."""
+        async with self._lock:
+            pos = self.position
+            if pos["status"] != "open" or pos["ticker"] != ticker:
+                return
+            proceeds = round(pos["contracts"] * sell_price / 100.0, 2)
+            pnl      = round(proceeds - pos["cost"], 2)
+            pos["status"] = "stopped"
+            pos["pnl"]    = pnl
+            self.executor_bankroll    = round(self.executor_bankroll + pnl, 2)
+            self.executor_session_pnl = round(self.executor_session_pnl + pnl, 2)
+            self._save_executor_bankroll()
+        self._dirty.set()
 
     def lock_entry_prediction(self) -> None:
         if self.prediction_locked:
@@ -467,13 +547,18 @@ class StateManager:
             "last_resolution_msg": self.last_resolution_msg,
             # Log
             "event_log": list(self.event_log)[:50],
-            # Bankroll
+            # Bankroll (model accuracy tracking)
             "bankroll": {
                 "balance":     round(self.bankroll, 2),
                 "last_bet":    round(self.last_bet, 2),
                 "last_pnl":    round(self.last_pnl, 2),
                 "session_pnl": round(self.session_pnl, 2),
             },
+            # Executor position + P&L
+            "trading_mode":         self.trading_mode,
+            "position":             dict(self.position),
+            "executor_bankroll":    round(self.executor_bankroll, 2),
+            "executor_session_pnl": round(self.executor_session_pnl, 2),
         }
 
     def _pred_accuracy(self, lifetime: bool = True) -> float:

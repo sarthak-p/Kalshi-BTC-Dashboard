@@ -17,24 +17,31 @@ from feeds.kalshi_ws import KalshiFeed
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 from strategy.scalper import Analyzer
+from trading.executor import Executor
 
 
 async def main() -> None:
     logger  = EventLogger()
-    state   = StateManager(momentum_threshold_usd=settings.momentum_threshold_usd, 
-                           starting_bankroll=settings.bankroll,)
+    state   = StateManager(
+        momentum_threshold_usd=settings.momentum_threshold_usd,
+        starting_bankroll=settings.bankroll,
+        trading_mode=settings.trading_mode,
+    )
     app.state.state_manager = state
 
     kalshi_feed = KalshiFeed(state=state, cfg=settings, logger=logger)
     btc_feed    = BtcFeed(state=state, cfg=settings, logger=logger)
-    analyzer    = Analyzer(state=state, cfg=settings, logger=logger)
+    executor    = Executor(state=state, cfg=settings, logger=logger)
+    analyzer    = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
 
     await state.log_event(
         f"Dashboard started — env={settings.kalshi_env}  "
+        f"mode={settings.trading_mode.upper()}  "
         f"entry={settings.min_entry_price_cents:.0f}–{settings.max_entry_price_cents:.0f}¢  "
         f"momentum=${settings.momentum_entry_usd:.0f}  "
         f"bankroll=${state.bankroll:.2f}"
     )
+    await executor.startup()
 
     uv_config = uvicorn.Config(
         app=app,
