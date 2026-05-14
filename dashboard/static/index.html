@@ -225,34 +225,10 @@ body {
           <div id="bias-val" class="mc-item-val">—</div>
         </div>
 
-        <div style="min-width:140px">
-          <div class="mc-item-label">RSI(14)</div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <span id="rsi-val" style="font-weight:700;min-width:34px;font-size:15px">—</span>
-            <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:60px">
-              <div id="rsi-bar" style="height:100%;width:50%;background:var(--muted);border-radius:3px;transition:width .6s,background .3s"></div>
-            </div>
-          </div>
-          <div id="rsi-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
-        </div>
-
         <div>
           <div class="mc-item-label">ADX(14)</div>
           <div id="adx-val" class="mc-item-val">—</div>
           <div id="adx-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
-        </div>
-
-        <div style="min-width:140px">
-          <div class="mc-item-label">BB(20) Position</div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <span id="bb-val" style="font-weight:700;min-width:34px;font-size:15px">—</span>
-            <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden;min-width:60px;position:relative">
-              <div style="position:absolute;left:0;top:0;width:40%;height:100%;background:rgba(16,185,129,.15)"></div>
-              <div style="position:absolute;right:0;top:0;width:40%;height:100%;background:rgba(239,68,68,.15)"></div>
-              <div id="bb-bar" style="position:absolute;top:0;height:100%;width:4px;background:var(--text);border-radius:2px;transition:left .6s"></div>
-            </div>
-          </div>
-          <div style="font-size:9px;color:var(--muted);margin-top:2px">lower ◀──────────── ▶ upper</div>
         </div>
 
         <div>
@@ -345,10 +321,10 @@ body {
               <td class="sc-hint">need 60%</td>
             </tr>
             <tr class="sc-row">
-              <td class="sc-icon" id="sc-icon-bias">·</td>
-              <td class="sc-label">Technical bias</td>
-              <td class="sc-value" id="sc-val-bias">—</td>
-              <td class="sc-hint" id="sc-hint-bias">RSI / BB</td>
+              <td class="sc-icon" id="sc-icon-cvd-interp">·</td>
+              <td class="sc-label">CVD signal</td>
+              <td class="sc-value" id="sc-val-cvd-interp">—</td>
+              <td class="sc-hint" id="sc-hint-cvd-interp">flow analysis</td>
             </tr>
           </tbody>
         </table>
@@ -559,30 +535,13 @@ function renderMarketConditions(s) {
   biasEl.textContent = bias.toUpperCase();
   biasEl.style.color = bias === 'up' ? 'var(--green)' : bias === 'down' ? 'var(--red)' : 'var(--yellow)';
 
-  if (tech.rsi != null) {
-    const rsi = tech.rsi;
-    const rsiEl = document.getElementById('rsi-val');
-    rsiEl.textContent = rsi.toFixed(1);
-    rsiEl.style.color = rsi < 40 ? 'var(--green)' : rsi > 60 ? 'var(--red)' : 'var(--text)';
-    document.getElementById('rsi-bar').style.width = rsi + '%';
-    document.getElementById('rsi-bar').style.background = rsi < 40 ? 'var(--green)' : rsi > 60 ? 'var(--red)' : 'var(--muted)';
-    document.getElementById('rsi-label').textContent = rsi < 30 ? 'OVERSOLD' : rsi < 40 ? 'leaning oversold' : rsi > 70 ? 'OVERBOUGHT' : rsi > 60 ? 'leaning overbought' : 'neutral';
-    if (tech.fetched) document.getElementById('cond-updated').textContent = 'Coinbase — ' + new Date().toLocaleTimeString('en-US', { hour12: false });
-  }
   if (tech.adx != null) {
     const adx = tech.adx;
     document.getElementById('adx-val').textContent = adx.toFixed(1);
     document.getElementById('adx-val').style.color = adx > 30 ? 'var(--green)' : adx < 20 ? 'var(--yellow)' : 'var(--text)';
     document.getElementById('adx-label').textContent = adx > 30 ? 'trending' : adx < 20 ? 'choppy' : 'moderate';
   }
-  if (tech.bb_position != null) {
-    const pos = tech.bb_position;
-    document.getElementById('bb-val').textContent = (pos * 100).toFixed(0) + '%';
-    document.getElementById('bb-val').style.color = pos < 0.4 ? 'var(--green)' : pos > 0.6 ? 'var(--red)' : 'var(--text)';
-    document.getElementById('bb-bar').style.left = 'calc(' + (pos * 100) + '% - 2px)';
-    document.getElementById('bb-bar').style.background = pos < 0.4 ? 'var(--green)' : pos > 0.6 ? 'var(--red)' : 'var(--text)';
-  }
-
+ 
   const momEl = document.getElementById('mom-val');
   if (s.velocity_pause) {
     momEl.textContent = '⚡ PAUSED'; momEl.style.color = 'var(--yellow)';
@@ -657,6 +616,19 @@ function renderRecommendation(s) {
   const warnEl = document.getElementById('rec-phase-warn');
   const phaseBadge = document.getElementById('rec-phase-badge');
 
+  // Suppress recommendation display during monitoring phase
+  if (tau > 480) {
+      box.className = '';
+      actEl.textContent = '— WAIT';
+      actEl.className = 'neutral';
+      entEl.textContent = 'Monitoring — signals forming, do not act';
+      entEl.style.color = 'var(--muted)';
+      sigsEl.innerHTML = '';
+      basisEl.innerHTML = '';
+      warnEl.style.display = 'none';
+      return;
+  }
+
   // Phase badge
   if (tau > 480) {
     phaseBadge.textContent = 'MONITORING — wait';
@@ -670,6 +642,23 @@ function renderRecommendation(s) {
   } else {
     phaseBadge.textContent = '—';
     phaseBadge.style.color = 'var(--muted)';
+  }
+
+  // Entry countdown
+  let countdown = document.getElementById('entry-countdown');
+  if (tau <= 480 && tau > 120) {
+      if (!countdown) {
+          countdown = document.createElement('div');
+          countdown.id = 'entry-countdown';
+          countdown.style.cssText = 'font-size:11px;color:var(--green);margin-top:6px';
+          document.getElementById('rec-box').appendChild(countdown);
+      }
+      const entrySecsLeft = tau - 120;
+      const em = Math.floor(entrySecsLeft / 60);
+      const es = Math.floor(entrySecsLeft % 60);
+      countdown.textContent = `⏱ Entry window closes in ${em}:${String(es).padStart(2,'0')}`;
+  } else if (countdown) {
+      countdown.remove();
   }
 
   box.className = side === 'YES' ? 'yes' : side === 'NO' ? 'no' : '';
@@ -686,7 +675,7 @@ function renderRecommendation(s) {
   }
 
   if (rec.entry_price != null && side) {
-    entEl.textContent = `Entry: ${rec.entry_price.toFixed(1)}¢   (${rec.signal_count}/4 signals)`;
+    entEl.textContent = `Entry: ${rec.entry_price.toFixed(1)}¢   (${rec.signal_count}/7 signals)`;
     entEl.style.color = 'var(--text)';
     // Warn if outside sweet spot
     const inRange = rec.entry_price >= 60 && rec.entry_price <= 85;
@@ -766,10 +755,35 @@ function renderAnalysisConditions(s) {
   }
   setRow('direction', dirOk, dirTxt);
 
-  setRow('bias',
-    conds.bias_ok === true ? true : conds.bias_ok === false ? false : null,
-    bias.toUpperCase(),
-    conds.bias_ok === false ? `${bias} conflicts` : 'RSI / BB');
+  const cvdW = s.cvd_window || 0;
+  const cvdT = s.cvd_total || 0;
+  const cvdChg = s.btc_change || 0;
+  let cvdInterpTxt = '—';
+  let cvdInterpOk = null;
+
+  if (cvdT >= 2.0) {
+      const ratio = cvdW / cvdT;
+      if (ratio > 0.08 && cvdChg >= 0) {
+          cvdInterpTxt = 'CONFIRMED ▲';
+          cvdInterpOk = true;
+      } else if (ratio < -0.08 && cvdChg <= 0) {
+          cvdInterpTxt = 'CONFIRMED ▼';
+          cvdInterpOk = true;
+      } else if (ratio < -0.08 && cvdChg > 0) {
+          cvdInterpTxt = 'ABSORPTION ▲';
+          cvdInterpOk = true;
+      } else if (ratio > 0.08 && cvdChg < 0) {
+          cvdInterpTxt = 'DISTRIBUTION ▼';
+          cvdInterpOk = false;
+      } else {
+          cvdInterpTxt = 'NEUTRAL';
+          cvdInterpOk = null;
+      }
+  } else {
+      cvdInterpTxt = 'LOW VOLUME';
+  }
+  setRow('cvd-interp', cvdInterpOk, cvdInterpTxt, 'flow analysis');
+  
 }
 
 // ── BTC panel ───────────────────────────────────────────────────────────────
@@ -779,7 +793,7 @@ function renderBtc(s) {
   document.getElementById('btc-tick').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
 
   if (s.btc_history && s.btc_history.length > 1)
-    renderSparkline(s.btc_history.map(p => p[1]));
+    renderSparkline(s.btc_history.map(p => p[1]), s.btc_open);
 
   if (s.btc_open > 0) {
     setVal('fv-baseline', '$' + fmt(s.btc_open));
@@ -829,17 +843,35 @@ function renderBtc(s) {
   }
 }
 
-function renderSparkline(prices) {
-  if (prices.length < 2) return;
-  const W = 400, H = 60, PAD = 2;
-  const min = Math.min(...prices), max = Math.max(...prices);
-  const range = max - min || 1;
-  const pts = prices.map((p, i) => {
-    const x = (i / (prices.length - 1)) * W;
-    const y = H - PAD - ((p - min) / range) * (H - PAD * 2);
-    return x.toFixed(1) + ',' + y.toFixed(1);
-  }).join(' ');
-  document.getElementById('spark-line').setAttribute('points', pts);
+function renderSparkline(prices, strike) {
+    if (prices.length < 2) return;
+    const W = 400, H = 60, PAD = 2;
+    const min = Math.min(...prices), max = Math.max(...prices);
+    const range = max - min || 1;
+    const pts = prices.map((p, i) => {
+        const x = (i / (prices.length - 1)) * W;
+        const y = H - PAD - ((p - min) / range) * (H - PAD * 2);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    document.getElementById('spark-line').setAttribute('points', pts);
+
+    // Strike line
+    if (strike && strike >= min && strike <= max) {
+        const strikeY = (H - PAD - ((strike - min) / range) * (H - PAD * 2)).toFixed(1);
+        let strikeLine = document.getElementById('spark-strike');
+        if (!strikeLine) {
+            strikeLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            strikeLine.setAttribute('id', 'spark-strike');
+            strikeLine.setAttribute('stroke', 'var(--yellow)');
+            strikeLine.setAttribute('stroke-width', '1');
+            strikeLine.setAttribute('stroke-dasharray', '4,3');
+            document.getElementById('sparkline').appendChild(strikeLine);
+        }
+        strikeLine.setAttribute('x1', '0');
+        strikeLine.setAttribute('x2', String(W));
+        strikeLine.setAttribute('y1', strikeY);
+        strikeLine.setAttribute('y2', strikeY);
+    }
 }
 
 // ── Accuracy panel ─────────────────────────────────────────────────────────

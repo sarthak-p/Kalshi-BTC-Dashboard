@@ -230,7 +230,7 @@ def _compute_recommendation(
     cvd_side = _cvd_signal(cvd_window, cvd_total, btc_change)
     if cvd_side == "YES":
         ratio_pct = round(cvd_window / cvd_total * 100) if cvd_total > 0 else 0
-        basis.append(f"CVD: +{ratio_pct}% net buying")
+        basis.append(f"CVD: +{abs(ratio_pct)}% net buying")
     elif cvd_side == "NO":
         ratio_pct = round(abs(cvd_window / cvd_total) * 100) if cvd_total > 0 else 0
         basis.append(f"CVD: -{ratio_pct}% net selling")
@@ -478,6 +478,12 @@ class Analyzer:
         lock_ts = getattr(self.state, 'recommendation_lock_ts', 0.0)
         current_side = self.state.recommendation["side"]
 
+        if self.state.active_contract != getattr(self.state, '_last_locked_contract', None):
+            self.state.recommendation_locked_side = None
+            self.state.recommendation_lock_ts = 0.0
+            self.state._last_locked_contract = self.state.active_contract
+            locked = None
+
         if current_side is not None:
             if locked is None:
                 self.state.recommendation_locked_side = current_side
@@ -491,11 +497,21 @@ class Analyzer:
                     self.state.recommendation["basis"].append(
                         f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
                     )
+        elif current_side is None and locked is not None:
+            if now_ts - lock_ts < 60.0:
+                self.state.recommendation["side"] = locked
+                self.state.recommendation["basis"].append(
+                    f"⚠ Null suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
+                )
 
-        if self.state.active_contract != getattr(self.state, '_last_locked_contract', None):
-            self.state.recommendation_locked_side = None
-            self.state.recommendation_lock_ts = 0.0
-            self.state._last_locked_contract = self.state.active_contract
+        if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
+            self.state._last_logged_rec_side = self.state.recommendation["side"]
+            await self.logger.log("recommendation", {
+                "side": self.state.recommendation["side"],
+                "entry_price": self.state.recommendation["entry_price"],
+                "signal_count": self.state.recommendation["signal_count"],
+                "basis": self.state.recommendation["basis"],
+            })
 
         self.state._dirty.set()
 
@@ -511,6 +527,7 @@ class Analyzer:
         bias = await fetch_bias(
             symbol=self.cfg.binance_symbol,
             interval=self.cfg.binance_klines_interval,
+            limit=100,
         )
         if bias is not None:
             await self.state.update_technicals(

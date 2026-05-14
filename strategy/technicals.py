@@ -151,9 +151,9 @@ def _classify(rsi: float, bb_pos: float, adx: float = 25.0) -> str:
         return "neutral"   # choppy market — don't trust RSI/BB signals
     bull = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
     bear = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
-    if bull >= 2 and bull > bear:
+    if bull >= 1 and bull > bear:
         return "up"
-    if bear >= 2 and bear > bull:
+    if bear >= 1 and bear > bull:
         return "down"
     return "neutral"
 
