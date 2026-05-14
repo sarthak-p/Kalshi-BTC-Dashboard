@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # ── BTC momentum threshold for recommendation ─────────────────────────────
     momentum_entry_usd: float = Field(default=30.0, env="MOMENTUM_ENTRY_USD")
 
+    # ── Edge filters (only trade when there's a real edge over the market) ────
+    # Minimum |btc_change| / tau_seconds — filters out small undecided moves early in window
+    min_commitment_rate: float = Field(default=0.20, env="MIN_COMMITMENT_RATE")
+    # Minimum gap between GBM probability and Kalshi mid price (cents)
+    # Ensures we only trade when our model disagrees meaningfully with the market
+    min_gbm_market_gap_cents: float = Field(default=8.0, env="MIN_GBM_MARKET_GAP_CENTS")
+
     # ── Thin-market filter ────────────────────────────────────────────────────
     min_open_interest: float = Field(default=500.0, env="MIN_OPEN_INTEREST")
 

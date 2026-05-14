@@ -82,7 +82,7 @@ class StateManager:
     def __init__(self, momentum_threshold_usd: float = 150.0, starting_bankroll: float = 250.0):
         # Feed state
         self.btc_price: float = 0.0
-        self.btc_history: deque[tuple[float, float]] = deque(maxlen=300)
+        self.btc_history: deque[tuple[float, float]] = deque(maxlen=6000)
         self.btc_feed_active: bool = False
         self.kalshi_feed_active: bool = False
 

@@ -57,8 +57,13 @@ def fair_value_yes_cents(
     btc_open: float,
     tau_seconds: float,
     sigma: float,
+    drift_usd_per_s: float = 0.0,
 ) -> float:
-    """GBM probability that BTC closes at or above the window open (0–100 cents)."""
+    """GBM probability that BTC closes at or above the window open (0–100 cents).
+
+    drift_usd_per_s: current BTC velocity in $/s (positive = rising). Shifts the
+    z-score so the model accounts for where price is heading, not just where it is.
+    """
     if btc_open <= 0:
         return 50.0
     btc_change = btc - btc_open
@@ -68,8 +73,43 @@ def fair_value_yes_cents(
     expected_vol_pct = sigma * math.sqrt(tau_seconds / _YEAR_SECONDS)
     if expected_vol_pct <= 0:
         return 100.0 if btc_change >= 0 else 0.0
-    z = btc_change_pct / expected_vol_pct
+    drift_pct = (drift_usd_per_s / btc_open) * tau_seconds
+    z = (btc_change_pct + drift_pct) / expected_vol_pct
     return max(5.0, min(95.0, _norm_cdf(z) * 100.0))
+
+
+def _btc_slope(history: list[tuple[float, float]]) -> float:
+    """Weighted blend of 90-s and 300-s BTC slopes in $/sec. Returns 0 if insufficient data.
+
+    Requires at least 60 s of actual history span before returning a non-zero slope so
+    that session startup and post-velocity-pause noise don't pollute the drift term.
+    """
+    if not history:
+        return 0.0
+    now = history[-1][0]
+    history_span = now - history[0][0]
+    if history_span < 60.0:
+        return 0.0
+
+    def _slope(secs: float) -> float | None:
+        pts = [(ts, p) for ts, p in history if ts >= now - secs]
+        if len(pts) < 5:
+            return None
+        dt = pts[-1][0] - pts[0][0]
+        if dt < 30.0:
+            return None
+        return (pts[-1][1] - pts[0][1]) / dt
+
+    s90  = _slope(90.0)
+    s300 = _slope(300.0)
+
+    if s90 is None and s300 is None:
+        return 0.0
+    if s90 is None:
+        return s300
+    if s300 is None:
+        return s90
+    return (s90 + s300 * 2.0) / 3.0
 
 
 def _predict_btc_close(
@@ -79,27 +119,9 @@ def _predict_btc_close(
 ) -> float:
     if not history or tau_seconds <= 0:
         return current_price
-    now = history[-1][0]
-
-    def _slope(secs: float) -> float | None:
-        pts = [(ts, p) for ts, p in history if ts >= now - secs]
-        if len(pts) < 5:
-            return None
-        dt = pts[-1][0] - pts[0][0]
-        return (pts[-1][1] - pts[0][1]) / dt if dt > 0 else None
-
-    s90  = _slope(90.0)
-    s300 = _slope(300.0)
-
-    if s90 is None and s300 is None:
+    slope = _btc_slope(history)
+    if slope == 0.0:
         return current_price
-    if s90 is None:
-        slope = s300
-    elif s300 is None:
-        slope = s90
-    else:
-        slope = (s90 + s300 * 2.0) / 3.0
-
     raw = current_price + slope * tau_seconds
     return max(current_price - 500.0, min(current_price + 500.0, raw))
 
@@ -189,11 +211,14 @@ def _compute_recommendation(
     momentum_usd: float,
     cvd_window: float = 0.0,
     cvd_total: float = 0.0,
-    adx: float = 25.0,  
-    bankroll: float = 250.0, 
+    adx: float = 25.0,
+    bankroll: float = 250.0,
     session_accuracy: float = 0.91,
     funding_pct: float = 0.0,
     kalshi_mid_history: list = None,
+    tau_seconds: float = 0.0,
+    min_commitment_rate: float = 0.20,
+    min_gbm_market_gap_cents: float = 8.0,
 ) -> dict:
     basis = []
 
@@ -311,6 +336,41 @@ def _compute_recommendation(
         side = None
         entry_price = None
 
+    # ── Edge gate 1: commitment rate ─────────────────────────────────────────
+    # Require |btc_change| / tau_seconds >= threshold so we don't trade small,
+    # undecided moves early in the window when anything can still happen.
+    if side is not None and tau_seconds > 30.0:
+        rate = abs(btc_change) / tau_seconds
+        if rate < min_commitment_rate:
+            basis.append(
+                f"⛔ Commitment {rate:.2f}$/s < {min_commitment_rate:.2f}$/s "
+                f"(${abs(btc_change):.0f} move with {tau_seconds:.0f}s left)"
+            )
+            side = None
+            entry_price = None
+
+    # ── Edge gate 2: GBM vs market gap ───────────────────────────────────────
+    # Only trade when our GBM probability meaningfully disagrees with what
+    # Kalshi is already pricing — otherwise we have no edge over the market.
+    if side is not None:
+        kalshi_mid_price = ob.mid()
+        if kalshi_mid_price is not None:
+            gap = fv - kalshi_mid_price  # positive = GBM > market (YES underpriced)
+            if side == "YES" and gap < min_gbm_market_gap_cents:
+                basis.append(
+                    f"⛔ No edge: GBM {fv:.0f}¢ vs market {kalshi_mid_price:.0f}¢ "
+                    f"(gap {gap:+.1f}¢, need +{min_gbm_market_gap_cents:.0f}¢)"
+                )
+                side = None
+                entry_price = None
+            elif side == "NO" and -gap < min_gbm_market_gap_cents:
+                basis.append(
+                    f"⛔ No edge: GBM {fv:.0f}¢ vs market {kalshi_mid_price:.0f}¢ "
+                    f"(gap {-gap:+.1f}¢, need +{min_gbm_market_gap_cents:.0f}¢)"
+                )
+                side = None
+                entry_price = None
+
     # Add bankroll and accuracy as parameters passed in from analyzer
     sizing = _kelly_position_size(
         bankroll=bankroll,
@@ -364,7 +424,8 @@ class Analyzer:
             sigma = self.state.dvol / 100.0   # Deribit DVOL is more stable than realized vol
         else:
             sigma = _rolling_realized_vol(history, fallback=self.cfg.btc_sigma)
-        fv = fair_value_yes_cents(btc, btc_open, tau_seconds, sigma)
+        slope = _btc_slope(history)
+        fv = fair_value_yes_cents(btc, btc_open, tau_seconds, sigma, drift_usd_per_s=slope)
         predicted_close = _predict_btc_close(history, btc, tau_seconds)
         await self.state.update_prediction(fv, predicted_close)
 
@@ -458,10 +519,13 @@ class Analyzer:
             cvd_window=self.state.cvd_window,
             cvd_total=self.state.cvd_total,
             adx=self.state.tech_adx,
-            bankroll=self.state.bankroll,                              
+            bankroll=self.state.bankroll,
             session_accuracy=self.state._pred_accuracy(lifetime=False) or 0.91,
-            funding_pct=self.state.funding_rate_pct, 
+            funding_pct=self.state.funding_rate_pct,
             kalshi_mid_history=list(self.state.kalshi_mid_history),
+            tau_seconds=tau_seconds,
+            min_commitment_rate=self.cfg.min_commitment_rate,
+            min_gbm_market_gap_cents=self.cfg.min_gbm_market_gap_cents,
         )
 
         if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
@@ -484,12 +548,18 @@ class Analyzer:
             self.state._last_locked_contract = self.state.active_contract
             locked = None
 
+        # GBM is considered strongly opposing if it's pinned at the 5% floor against the lock.
+        gbm_strongly_opposes = (
+            (locked == "YES" and fv <= 10.0) or
+            (locked == "NO"  and fv >= 90.0)
+        )
+
         if current_side is not None:
             if locked is None:
                 self.state.recommendation_locked_side = current_side
                 self.state.recommendation_lock_ts = now_ts
             elif current_side != locked:
-                if now_ts - lock_ts >= 60.0:
+                if now_ts - lock_ts >= 60.0 or gbm_strongly_opposes:
                     self.state.recommendation_locked_side = current_side
                     self.state.recommendation_lock_ts = now_ts
                 else:
@@ -498,7 +568,7 @@ class Analyzer:
                         f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
                     )
         elif current_side is None and locked is not None:
-            if now_ts - lock_ts < 60.0:
+            if now_ts - lock_ts < 60.0 and not gbm_strongly_opposes:
                 self.state.recommendation["side"] = locked
                 self.state.recommendation["basis"].append(
                     f"⚠ Null suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
