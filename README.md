@@ -6,7 +6,7 @@ Real-time market analysis dashboard for Kalshi BTC 15-minute binary markets. Mon
 
 Each Kalshi `KXBTCD` contract is a binary: pays $1 if BTC closes at or above the window open price, $0 otherwise.
 
-The bot connects to Kalshi (orderbook + contract metadata), Coinbase (live BTC price, 1-min candles, and trade flow), Deribit (implied volatility index), and OKX (futures basis + funding rate), then continuously analyzes each 15-minute window using four signals:
+The bot connects to Kalshi (orderbook + contract metadata), Coinbase (live BTC price, 1-min candles, and trade flow), Deribit (implied volatility index), and OKX (futures basis + funding rate), then continuously analyzes each 15-minute window using seven signals — four core votes and three confirmatory:
 
 **1. GBM Fair Value**
 Uses a Geometric Brownian Motion model to estimate the probability that BTC closes above the window-open strike. Inputs: current BTC price, strike, time remaining, and **Deribit DVOL** (implied volatility index — more stable than realized vol). Output: `fair_value_yes_pct` (0–100). Updates every 50ms. Falls back to 10-minute rolling realized vol if DVOL is unavailable.
@@ -30,10 +30,16 @@ Two or more points in the same direction → bias, unless ADX < 20 (choppy marke
 **4. CVD — Cumulative Volume Delta (Coinbase trade stream)**
 Tracks every Coinbase spot trade during the window. Buyer-initiated trades (hitting the ask) add to CVD; seller-initiated trades (hitting the bid) subtract. If net buying exceeds 8% of total window volume → bullish signal. If net selling exceeds 8% → bearish signal. Resets at each new window open.
 
-CVD distinguishes real buying pressure from price drift. A BTC rally with negative CVD (sellers absorbing it) is a weaker setup than one where buyers are aggressively lifting.
+CVD distinguishes confirmed momentum (CVD and price agree) from absorption (divergence). Selling while price rises signals a large buyer absorbing retail flow — treated as bullish, not neutral. Buying while price falls signals distribution — bearish.
+
+**5. Funding Rate** — confirmatory only. Crowded longs (>0.01%) → bearish lean. Crowded shorts (<-0.01%) → bullish lean.
+
+**6. Orderbook Imbalance** — confirmatory only. Bid-heavy (>0.20) → YES. Ask-heavy (<-0.20) → NO.
+
+**7. Kalshi Mid Momentum** — confirmatory only. 5-min slope >0.05¢/s → YES. <-0.05¢/s → NO.
 
 **Recommendation — the one signal to act on**
-Requires **3 of 4 signals** to agree in trending markets (ADX ≥ 20), or **3 of 4 with no opposition** in choppy markets (ADX < 20). In choppy conditions ADX also suppresses the technicals signal, effectively requiring GBM, BTC momentum, and CVD to align before firing. Shows: side, entry price (best ask or implied NO ask), signal count (X/4), and the reason each signal voted.
+Requires **3 of 4 core signals** in trending markets (ADX ≥ 20), **4 of 4** in choppy. Bonus signals strengthen conviction only — cannot create or flip a recommendation. Flips suppressed for 60 seconds. Suppressed entirely if line crossings exceed MAX_LINE_CROSSINGS. In choppy conditions ADX also suppresses the technicals signal, effectively requiring GBM, BTC momentum, and CVD to align before firing. Shows: side, entry price (best ask or implied NO ask), signal count (X/4), and the reason each signal voted.
 
 **Only enter when the Recommendation fires AND the phase shows `ENTRY OPEN`.** During `MONITORING` (> 8 min left) the signals are forming — do not act. During `TOO LATE` (< 2 min) it's too late to enter with meaningful upside.
 
@@ -111,7 +117,7 @@ main.py
   → KalshiFeed.run()               REST contract discovery + WS orderbook
   → BtcFeed.run()                  Coinbase BTC-USD price (WS ticker) + CVD (WS trades)
   → Analyzer.run()
-      _analysis_loop()             GBM model + 4-signal recommendation (every 50ms)
+      _analysis_loop()             GBM model + 7-signal recommendation with commitment lock (every 50ms)
       _bias_refresher()            RSI/BB + Deribit DVOL + OKX basis/funding (every 60s)
       _window_resolver()           logs resolution vs. prediction (every 1s)
   → FastAPI/Uvicorn                dashboard server + WS broadcast
@@ -141,7 +147,7 @@ At contract discovery the bot resolves the strike in priority order:
 | `MIN_ENTRY_WINDOW_S` | `120` | Phase switches to `too_late` when < this many seconds remain |
 | `MIN_ENTRY_PRICE_CENTS` | `60` | Lower bound of the "in-range" price check (¢) |
 | `MAX_ENTRY_PRICE_CENTS` | `85` | Upper bound of the "in-range" price check (¢) |
-| `MOMENTUM_ENTRY_USD` | `30` | Min BTC move from window open to trigger momentum signal |
+| `MOMENTUM_ENTRY_USD` | `30` | Min BTC move — 1.1× hysteresis applied |
 | `MAX_LINE_CROSSINGS` | `2` | Max times Kalshi mid may cross 50¢ before `crossings_ok` fails |
 | `MIN_DIRECTION_CONSISTENCY` | `0.6` | Min fraction of recent Kalshi mid steps trending away from 50¢ |
 | `KALSHI_MID_MAX_RANGE_CENTS` | `22` | Max ¢ range in last 60s before market is flagged erratic |

@@ -103,20 +103,29 @@ def _predict_btc_close(
     raw = current_price + slope * tau_seconds
     return max(current_price - 500.0, min(current_price + 500.0, raw))
 
-
 def _cvd_signal(cvd_window: float, cvd_total: float, btc_change: float = 0.0) -> Optional[str]:
-    """YES/NO when CVD agrees with price direction; None when diverging or insufficient volume.
-
-    Divergence (e.g. net selling while price rises) indicates absorption — the
-    move is holding despite pressure — which is neutral, not a counter-signal.
     """
-    if cvd_total < 0.5:
+    YES/NO based on CVD direction and whether it confirms or diverges from price.
+    
+    Confirmed momentum: CVD and price agree → strong signal.
+    Absorption: CVD and price diverge → contrarian signal (large participant absorbing flow).
+    """
+    if cvd_total < 2.0:
         return None
     ratio = cvd_window / cvd_total
-    if ratio > 0.08:
-        return "YES" if btc_change >= 0 else None   # buying + rising = confirm; buying + falling = distribution noise
-    if ratio < -0.08:
-        return "NO" if btc_change <= 0 else None    # selling + falling = confirm; selling + rising = absorption
+
+    # Confirmed momentum
+    if ratio > 0.08 and btc_change >= 0:
+        return "YES"   # buying + rising = confirmed bull momentum
+    if ratio < -0.08 and btc_change <= 0:
+        return "NO"    # selling + falling = confirmed bear momentum
+
+    # Absorption signals (divergence = large participant in control)
+    if ratio < -0.08 and btc_change > 0:
+        return "YES"   # selling but price rising = absorption, strong buyer
+    if ratio > 0.08 and btc_change < 0:
+        return "NO"    # buying but price falling = distribution, strong seller
+
     return None
 
 def _kelly_position_size(
@@ -183,35 +192,37 @@ def _compute_recommendation(
     adx: float = 25.0,  
     bankroll: float = 250.0, 
     session_accuracy: float = 0.91,
+    funding_pct: float = 0.0,
+    kalshi_mid_history: list = None,
 ) -> dict:
     basis = []
 
-    if fv > 55:
+    if fv > 58:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 45:
+    elif fv < 42:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
         model_side = None
         basis.append(f"GBM: {fv:.0f}% (neutral)")
 
-    if btc_change >= momentum_usd:
+    if btc_change >= momentum_usd * 1.1:
         btc_side = "YES"
         basis.append(f"BTC: +${btc_change:.0f} bullish")
-    elif btc_change <= -momentum_usd:
+    elif btc_change <= -momentum_usd * 1.1:
         btc_side = "NO"
         basis.append(f"BTC: -${abs(btc_change):.0f} bearish")
     else:
         btc_side = None
-        basis.append(f"BTC: ${btc_change:+.0f} (< ${momentum_usd:.0f} threshold)")
+        basis.append(f"BTC: ${btc_change:+.0f} (< ${momentum_usd * 1.1:.0f} threshold)")
 
     if bias == "up":
         bias_side = "YES"
         basis.append("Technicals: bullish (RSI/BB)")
     elif bias == "down":
         bias_side = "NO"
-        basis.append("Technicals: bearish (RSI/BB)")
+        basis.append("Technicals: bearish (RSI/BB) [confirm-only]")
     else:
         bias_side = None
         basis.append("Technicals: neutral")
@@ -226,12 +237,60 @@ def _compute_recommendation(
     else:
         basis.append("CVD: neutral / insufficient volume")
 
-    signals = [model_side, btc_side, bias_side, cvd_side]
+     # Funding rate signal
+    if funding_pct > 0.01:
+        funding_side = "NO"
+        basis.append(f"Funding: +{funding_pct:.4f}% (crowded longs)")
+    elif funding_pct < -0.01:
+        funding_side = "YES"
+        basis.append(f"Funding: {funding_pct:.4f}% (crowded shorts)")
+    else:
+        funding_side = None
+        basis.append(f"Funding: {funding_pct:.4f}% (neutral)")
+
+    # Orderbook imbalance signal
+    imb = ob.imbalance()
+    if imb is not None and imb > 0.20:
+        imbalance_side = "YES"
+        basis.append(f"OB imbalance: {imb:+.2f} (bid-heavy)")
+    elif imb is not None and imb < -0.20:
+        imbalance_side = "NO"
+        basis.append(f"OB imbalance: {imb:+.2f} (ask-heavy)")
+    else:
+        imbalance_side = None
+        basis.append(f"OB imbalance: {f'{imb:+.2f}' if imb is not None else 'n/a'} (neutral)")
+
+    # Kalshi mid momentum signal
+    kalshi_momentum_side = None
+    if kalshi_mid_history and len(kalshi_mid_history) >= 10:
+        now_ts = kalshi_mid_history[-1][0]
+        recent = [(ts, m) for ts, m in kalshi_mid_history if ts >= now_ts - 300.0]
+        if len(recent) >= 5:
+            slope = (recent[-1][1] - recent[0][1]) / max(recent[-1][0] - recent[0][0], 1.0)
+            if slope > 0.05:
+                kalshi_momentum_side = "YES"
+                basis.append(f"Kalshi mid: rising ({slope:+.3f}¢/s)")
+            elif slope < -0.05:
+                kalshi_momentum_side = "NO"
+                basis.append(f"Kalshi mid: falling ({slope:+.3f}¢/s)")
+            else:
+                basis.append(f"Kalshi mid: flat ({slope:+.3f}¢/s)")
+
+    dominant = "YES" if model_side == "YES" or btc_side == "YES" else "NO" if model_side == "NO" or btc_side == "NO" else None
+    confirmatory_bias = bias_side if bias_side == dominant else None
+    signals = [model_side, btc_side, confirmatory_bias, cvd_side]
     yes_count = signals.count("YES")
     no_count  = signals.count("NO")
 
+    # Bonus confirmatory signals — can only add to the leading side, never subtract
+    bonus = [funding_side, imbalance_side, kalshi_momentum_side]
+    if yes_count > no_count:
+        yes_count += sum(1 for s in bonus if s == "YES")
+    elif no_count > yes_count:
+        no_count += sum(1 for s in bonus if s == "NO")
+
     # With 4 signals: require clear majority (3+ OR 2 with no opposition)
-    min_signals = 3 if adx < 20 else 2
+    min_signals = 4 if adx < 20 else 3
 
     # In choppy markets require 3 signals; in trending markets 2 is enough
     if yes_count >= 3 and yes_count > no_count:
@@ -262,12 +321,11 @@ def _compute_recommendation(
     return {
         "side": side,
         "entry_price": round(entry_price, 1) if entry_price is not None else None,
-        "confidence": round(max(yes_count, no_count) / 4.0, 2),
+        "confidence": round(max(yes_count, no_count) / 7.0, 2),
         "signal_count": max(yes_count, no_count),
         "basis": basis,
         "sizing": sizing,
     }
-
 
 class Analyzer:
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger):
@@ -402,7 +460,43 @@ class Analyzer:
             adx=self.state.tech_adx,
             bankroll=self.state.bankroll,                              
             session_accuracy=self.state._pred_accuracy(lifetime=False) or 0.91,
+            funding_pct=self.state.funding_rate_pct, 
+            kalshi_mid_history=list(self.state.kalshi_mid_history),
         )
+
+        if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
+            self.state._last_logged_rec_side = self.state.recommendation["side"]
+            await self.logger.log("recommendation", {
+                "side": self.state.recommendation["side"],
+                "entry_price": self.state.recommendation["entry_price"],
+                "signal_count": self.state.recommendation["signal_count"],
+                "basis": self.state.recommendation["basis"],
+            })
+
+        now_ts = time.time()
+        locked = getattr(self.state, 'recommendation_locked_side', None)
+        lock_ts = getattr(self.state, 'recommendation_lock_ts', 0.0)
+        current_side = self.state.recommendation["side"]
+
+        if current_side is not None:
+            if locked is None:
+                self.state.recommendation_locked_side = current_side
+                self.state.recommendation_lock_ts = now_ts
+            elif current_side != locked:
+                if now_ts - lock_ts >= 60.0:
+                    self.state.recommendation_locked_side = current_side
+                    self.state.recommendation_lock_ts = now_ts
+                else:
+                    self.state.recommendation["side"] = locked
+                    self.state.recommendation["basis"].append(
+                        f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
+                    )
+
+        if self.state.active_contract != getattr(self.state, '_last_locked_contract', None):
+            self.state.recommendation_locked_side = None
+            self.state.recommendation_lock_ts = 0.0
+            self.state._last_locked_contract = self.state.active_contract
+
         self.state._dirty.set()
 
     # ── Technicals refresh (every 60 s) ───────────────────────────────────────

@@ -69,7 +69,14 @@ class Orderbook:
         if bb is not None and ba is not None:
             return (bb + ba) / 2.0
         return bb if bb is not None else ba
-
+    
+    def imbalance(self) -> Optional[float]:
+        bid_vol = sum(self.yes_bids.values())
+        ask_vol = sum(self.yes_asks.values())
+        total = bid_vol + ask_vol
+        if total < 10:
+            return None
+        return (bid_vol - ask_vol) / total  # +1 = all bids, -1 = all asks
 
 class StateManager:
     def __init__(self, momentum_threshold_usd: float = 150.0, starting_bankroll: float = 250.0):
