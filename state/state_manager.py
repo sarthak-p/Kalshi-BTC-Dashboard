@@ -12,6 +12,61 @@ from fastapi import WebSocket
 
 _STATS_FILE             = Path("logs/lifetime_stats.json")
 _EXECUTOR_BANKROLL_FILE = Path("logs/executor_bankroll.json")
+_RESOLUTION_FILE        = Path("logs/resolution_history.json")
+
+
+def _load_resolution_history() -> list[str]:
+    try:
+        history = list(json.loads(_RESOLUTION_FILE.read_text()).get("resolutions", []))
+        if history:
+            return history
+    except Exception:
+        pass
+    return _bootstrap_resolution_history()
+
+
+def _bootstrap_resolution_history() -> list[str]:
+    """Build resolution history from predictions.csv on first run (no JSON file yet)."""
+    import csv as _csv
+    pred_path = Path("logs/predictions.csv")
+    if not pred_path.exists():
+        return []
+    try:
+        rows: list[dict] = []
+        with open(pred_path, newline="") as f:
+            for row in _csv.DictReader(f):
+                rows.append(row)
+        messages: list[str] = []
+        for row in reversed(rows[-100:]):
+            try:
+                ticker      = row.get("ticker", "?")
+                btc_close   = float(row.get("btc_close") or 0)
+                btc_change  = float(row.get("btc_change") or 0)
+                resolution  = row.get("resolution", "?")
+                src         = row.get("result_source", "?")
+                final_side  = row.get("final_model_side", "")
+                correct_raw = row.get("prediction_correct", "")
+                chg_sign    = "+" if btc_change >= 0 else ""
+                pred_label  = ""
+                if final_side and correct_raw in ("True", "False"):
+                    pred_label = f"  model={final_side} [{'CORRECT' if correct_raw == 'True' else 'WRONG'}]"
+                messages.append(
+                    f"{ticker}  BTC {btc_close:.2f}  "
+                    f"({chg_sign}{btc_change:.2f})  → {resolution} [{src}]{pred_label}"
+                )
+            except Exception:
+                continue
+        return messages
+    except Exception:
+        return []
+
+
+def _save_resolution_history(history: list[str]) -> None:
+    try:
+        _RESOLUTION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _RESOLUTION_FILE.write_text(json.dumps({"resolutions": history[:100]}))
+    except Exception:
+        pass
 
 def _load_pred_stats() -> tuple[int, int, int, int]:
     try:
@@ -193,10 +248,15 @@ class StateManager:
             "pnl":        None,
         }
         # Separate P&L for executor trades (paper or live)
+        self.executor_bankroll_original: float = starting_bankroll   # set by loader below
+        self.executor_all_time_trades: int = 0                       # set by loader below
         self.executor_bankroll: float = self._load_executor_bankroll(default=starting_bankroll)
         self.executor_bankroll_initial: float = self.executor_bankroll  # frozen at session start
         self.executor_session_pnl: float = 0.0
         self.executor_session_trades: int = 0
+
+        # Resolution history (persisted across restarts)
+        self.resolution_history: list[str] = _load_resolution_history()
 
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
@@ -326,14 +386,22 @@ class StateManager:
 
     def _load_executor_bankroll(self, default: float) -> float:
         try:
-            return float(json.loads(_EXECUTOR_BANKROLL_FILE.read_text())["bankroll"])
+            data = json.loads(_EXECUTOR_BANKROLL_FILE.read_text())
+            bankroll = float(data["bankroll"])
+            self.executor_bankroll_original = float(data.get("original", bankroll))
+            self.executor_all_time_trades   = int(data.get("trades_all_time", 0))
+            return bankroll
         except Exception:
             return default
 
     def _save_executor_bankroll(self) -> None:
         try:
             _EXECUTOR_BANKROLL_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _EXECUTOR_BANKROLL_FILE.write_text(json.dumps({"bankroll": round(self.executor_bankroll, 2)}))
+            _EXECUTOR_BANKROLL_FILE.write_text(json.dumps({
+                "bankroll":        round(self.executor_bankroll, 2),
+                "original":        round(self.executor_bankroll_original, 2),
+                "trades_all_time": self.executor_all_time_trades,
+            }))
         except Exception:
             pass
 
@@ -341,7 +409,8 @@ class StateManager:
         self, ticker: str, side: str, contracts: int, fill_price: float, mode: str
     ) -> None:
         async with self._lock:
-            self.executor_session_trades += 1
+            self.executor_session_trades  += 1
+            self.executor_all_time_trades += 1
             self.position = {
                 "ticker":     ticker,
                 "side":       side,
@@ -352,6 +421,7 @@ class StateManager:
                 "mode":       mode,
                 "pnl":        None,
             }
+            self._save_executor_bankroll()
         self._dirty.set()
 
     async def settle_position(self, ticker: str, resolution: str) -> None:
@@ -404,9 +474,11 @@ class StateManager:
         self.prediction_locked = True
 
     def lock_final_model_decision(self, side: Optional[str]) -> None:
-        """Lock the model's 8-min recommendation — called once per window on the first entry_open tick."""
+        """Lock the model's 8-min recommendation — retries each entry_open tick until side is non-None."""
         if self.final_model_locked:
             return
+        if side is None:
+            return  # keep retrying until a real signal appears
         self.final_model_side = side
         self.final_model_locked = True
 
@@ -470,6 +542,9 @@ class StateManager:
     async def set_last_resolution(self, msg: str) -> None:
         async with self._lock:
             self.last_resolution_msg = msg
+            self.resolution_history.insert(0, msg)
+            self.resolution_history = self.resolution_history[:100]
+        _save_resolution_history(self.resolution_history)
         self._dirty.set()
 
     # ── Serialisation ─────────────────────────────────────────────────────────
@@ -557,12 +632,16 @@ class StateManager:
             # Log
             "event_log": list(self.event_log)[:50],
             # Executor position + P&L
-            "trading_mode":         self.trading_mode,
-            "position":             dict(self.position),
+            "trading_mode":              self.trading_mode,
+            "position":                  dict(self.position),
             "executor_bankroll":         round(self.executor_bankroll, 2),
             "executor_bankroll_initial": round(self.executor_bankroll_initial, 2),
+            "executor_bankroll_original": round(self.executor_bankroll_original, 2),
             "executor_session_pnl":      round(self.executor_session_pnl, 2),
             "executor_session_trades":   self.executor_session_trades,
+            "executor_all_time_trades":  self.executor_all_time_trades,
+            # Persistent resolution history
+            "resolution_history":        self.resolution_history[:50],
         }
 
     def _pred_accuracy(self, lifetime: bool = True) -> float:

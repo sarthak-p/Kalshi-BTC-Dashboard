@@ -1,6 +1,6 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary context. Places simulated or real orders whenever the model has a recommendation.
+Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary context. Places simulated or real orders whenever the model has a recommendation at the 8-minute mark.
 
 Switch between paper (simulated) and live (real money) by changing one line in `.env`.
 
@@ -34,11 +34,16 @@ First signal that fires wins:
 
 ### Trade lifecycle
 
-- **Entry**: at the **8-minute mark** (`entry_open` phase), the model locks its recommendation. The executor places one trade per window based on that locked decision. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately.
-- **Hold**: position sits untouched until window close or a reversal
-- **Reversal**: if the recommendation flips to the opposite side and holds for **60 seconds** (flip lock), the executor closes the existing position and enters the new side. Early break only if GBM strongly opposes the locked side (locked YES and GBM ≤ 35%, or locked NO and GBM ≥ 70%).
+- **Entry**: at the **8-minute mark** (`entry_open` phase), the model locks its recommendation. The lock retries every analysis tick until a non-None recommendation appears — so brief warm-up or flip-suppression delays won't silently prevent a trade. The executor places one trade per window based on the locked decision. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately.
+- **Hold**: position sits untouched until window close
 - **Settlement**: at window close the position is marked won/lost based on the official Kalshi result
 - **Unfilled order guard**: if a buy or sell order is confirmed resting (not filled) after 3 seconds, it is cancelled on Kalshi and the position state rolls back — prevents holding two real positions with one in local state
+
+### Position sizing — Martingale
+
+Base unit is **$100 per trade**. After a losing window, the next trade sizes up to **$300** (3×). As soon as a trade wins, sizing reverts to $100. This means a single win always recovers the previous loss plus a profit at base size.
+
+At 40¢ entry, $100 buys ~250 contracts; at 60¢ entry ~166 contracts.
 
 ---
 
@@ -103,10 +108,10 @@ Set `TRADING_MODE` in `.env`:
 
 | Mode | Behaviour |
 |------|-----------|
-| `paper` | Simulated fills at current market price. P&L tracked in `logs/executor_bankroll.json`. |
+| `paper` | Simulated fills at current market price. P&L tracked in `logs/executor_bankroll.json` and persists across restarts. |
 | `live` | Real market orders via Kalshi REST API. Balance fetched from Kalshi at startup and after each settlement. |
 
-**To reset the paper balance**, add `PAPER_BANKROLL_RESET=300.0` to `.env` and restart. The balance resets to that value. Remove the line (or set to `0`) on subsequent restarts to resume normal persistence.
+**To reset the paper balance**, set `PAPER_BANKROLL_RESET=1000.0` in `.env` and restart. The balance resets to that value and the file is overwritten. Set back to `0` (or remove the line) on subsequent restarts to resume normal persistence.
 
 ---
 
@@ -158,7 +163,7 @@ main.py
       _bias_refresher()             RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
       _window_resolver()            settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_trade()                 enter/reverse based on locked model recommendation
+      maybe_trade()                 enter based on locked model recommendation (Martingale sizing)
   → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
 ```
 
@@ -187,17 +192,17 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `KALSHI_PRIVATE_KEY_B64` | — | Base64-encoded PEM private key |
 | `BTC_SERIES_TICKER` | `KXBTC15M` | Series ticker for contract auto-discovery |
 | `TRADING_MODE` | `paper` | `paper` (simulated) or `live` (real orders) |
-| `BANKROLL` | `250.00` | Starting bankroll for model accuracy tracking |
-| `PAPER_BANKROLL_RESET` | `0.0` | Set to a positive value to reset paper balance on next startup, then remove |
+| `BANKROLL` | `1000.00` | Starting paper bankroll |
+| `PAPER_BANKROLL_RESET` | `0` | Set to a positive value to reset paper balance on next startup, then set back to 0 |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (0.30 $/s ≈ $18/min) |
 | `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
 | `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Warning threshold: GBM vs Kalshi mid gap (shown as ⚠ in basis, does not block) |
-| `MIN_ENTRY_PRICE_CENTS` | `30.0` | Used in dashboard phase indicator — no longer blocks execution |
-| `MAX_ENTRY_PRICE_CENTS` | `85.0` | Used in dashboard phase indicator — no longer blocks execution |
-| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window indicator threshold (seconds remaining) — 8-min mark |
-| `MIN_ENTRY_WINDOW_S` | `120.0` | "Too late" threshold (seconds remaining) |
+| `MIN_ENTRY_PRICE_CENTS` | `8.0` | Used in dashboard phase indicator — does not block execution |
+| `MAX_ENTRY_PRICE_CENTS` | `65.0` | Used in dashboard phase indicator — does not block execution |
+| `MAX_ENTRY_WINDOW_S` | `420.0` | Entry window opens when seconds remaining crosses this (8-min mark) |
+| `MIN_ENTRY_WINDOW_S` | `120.0` | "Too late" threshold — entry window closes below this |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |
 | `MIN_OPEN_INTEREST` | `500` | Thin-market flag threshold (contracts) |
@@ -218,7 +223,24 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `logs/technicals_discovery.csv` | Technical bias at window discovery vs actual resolution — used to evaluate whether RSI/BB has genuine predictive value |
 | `logs/lifetime_stats.json` | Persisted prediction accuracy counters across all sessions |
 | `logs/bankroll.json` | Model accuracy bankroll (hypothetical P&L from every prediction) |
-| `logs/executor_bankroll.json` | Bot bankroll (actual paper/live trade P&L only) |
+| `logs/executor_bankroll.json` | Bot bankroll — actual paper/live trade P&L, persists across restarts |
+| `logs/resolution_history.json` | Last 100 window resolutions with model accuracy labels, persists across restarts |
+
+---
+
+## Dashboard — Resolution log
+
+The resolution log on the dashboard shows each completed window:
+
+```
+KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CORRECT]
+```
+
+- **`→ YES / NO`** — what Kalshi settled (YES = BTC closed above strike, NO = below)
+- **`[Kalshi]`** — result from live API; `[estimated]` = API timed out, inferred from Coinbase price
+- **`model=YES [CORRECT]`** — the 8-min locked recommendation and whether it was right
+- **`slope=CORRECT/WRONG`** — GBM slope direction accuracy (tracked separately)
+- **Green** = model predicted and was correct; **Red** = model predicted and was wrong; **Gray** = no model prediction that window
 
 ---
 
@@ -230,4 +252,4 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but only fires a recommendation when GBM or slope thresholds are met.
 - **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows.
 - **Unified strategy.** The executor follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 70% → YES) with slope as a fallback. The executor places a trade for every recommendation the model locks at the 8-minute mark, with no additional price-range or edge-gap filters.
-- **Position sizing.** Flat $5 per trade regardless of bankroll. At 40¢ entry this buys ~12 contracts; at 60¢ entry ~8 contracts.
+- **Position sizing.** $100 base per trade (~250 contracts at 40¢). Martingale: triples to $300 after a loss, reverts to $100 after a win.

@@ -46,8 +46,10 @@ class Executor:
                 )
         else:
             if self.cfg.paper_bankroll_reset > 0:
-                self.state.executor_bankroll = self.cfg.paper_bankroll_reset
-                self.state.executor_bankroll_initial = self.cfg.paper_bankroll_reset
+                self.state.executor_bankroll          = self.cfg.paper_bankroll_reset
+                self.state.executor_bankroll_initial  = self.cfg.paper_bankroll_reset
+                self.state.executor_bankroll_original = self.cfg.paper_bankroll_reset
+                self.state.executor_all_time_trades   = 0
                 self.state._save_executor_bankroll()
                 await self.state.log_event(
                     f"📄 Paper mode — balance reset to ${self.cfg.paper_bankroll_reset:.2f}"
@@ -109,7 +111,16 @@ class Executor:
         if in_contract and pos["side"] != target_side:
             await self._close_position(contract, pos)
 
-        n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
+        prev = self.state.position
+        if prev["status"] == "lost" and prev["ticker"] != contract:
+            unit_size = _UNIT_SIZE_USD * 3.0
+            await self.state.log_event(
+                f"📈 Martingale: last round lost — sizing ${unit_size:.0f} this window"
+            )
+        else:
+            unit_size = _UNIT_SIZE_USD
+
+        n_contracts = max(1, int(unit_size / (price / 100.0)))
 
         if self.cfg.trading_mode == "paper":
             await self._paper_fill(contract, target_side, n_contracts, price)

@@ -198,13 +198,14 @@ body {
         <div class="metric-card">
           <div class="metric-label">Bot Balance</div>
           <div class="metric-value" id="exec-balance">—</div>
-          <div class="metric-sub" id="exec-balance-sub">—</div>
+          <div class="metric-sub" id="exec-balance-sub">started at —</div>
         </div>
 
         <div class="metric-card">
-          <div class="metric-label">Bot Session P&L</div>
-          <div class="metric-value" id="exec-session-pnl">—</div>
-          <div class="metric-sub" id="exec-session-trades-sub">0 trades this session</div>
+          <div class="metric-label">P&amp;L — All-time / Session</div>
+          <div class="metric-value" id="exec-alltime-pnl">—</div>
+          <div class="metric-sub" id="exec-session-pnl-sub">session: —</div>
+          <div class="metric-sub" id="exec-session-trades-sub">—</div>
         </div>
 
         <div class="metric-card" style="grid-column:span 2">
@@ -409,25 +410,29 @@ function renderExecutor(s) {
     el.style.color = modeStyle.color;
   });
 
+  const origBal = s.executor_bankroll_original != null ? s.executor_bankroll_original : execBal;
+
   const balEl = document.getElementById('exec-balance');
-  const initBal = s.executor_bankroll_initial != null ? s.executor_bankroll_initial : execBal;
   if (balEl) {
     balEl.textContent = '$' + execBal.toFixed(2);
-    balEl.style.color = execBal >= initBal ? 'var(--green)' : 'var(--red)';
-    const allTimeDelta = execBal - initBal;
+    balEl.style.color = execBal >= origBal ? 'var(--green)' : 'var(--red)';
     document.getElementById('exec-balance-sub').textContent =
-      (allTimeDelta >= 0 ? '+' : '') + '$' + allTimeDelta.toFixed(2) + ' this session';
+      'started at $' + origBal.toFixed(2);
   }
-
-  const pnlEl = document.getElementById('exec-session-pnl');
-  if (pnlEl) {
-    pnlEl.textContent = (execPnl >= 0 ? '+' : '') + '$' + execPnl.toFixed(2);
-    pnlEl.style.color = execPnl > 0 ? 'var(--green)' : execPnl < 0 ? 'var(--red)' : 'var(--muted)';
+  const allTimePnl = execBal - origBal;
+  const atPnlEl    = document.getElementById('exec-alltime-pnl');
+  if (atPnlEl) {
+    atPnlEl.textContent = (allTimePnl >= 0 ? '+' : '') + '$' + allTimePnl.toFixed(2);
+    atPnlEl.style.color = allTimePnl > 0 ? 'var(--green)' : allTimePnl < 0 ? 'var(--red)' : 'var(--muted)';
+  }
+  const sesSubEl = document.getElementById('exec-session-pnl-sub');
+  if (sesSubEl) {
+    sesSubEl.textContent = 'session: ' + (execPnl >= 0 ? '+' : '') + '$' + execPnl.toFixed(2);
   }
   const tradeCountEl = document.getElementById('exec-session-trades-sub');
   if (tradeCountEl) {
-    const n = s.executor_session_trades || 0;
-    tradeCountEl.textContent = n + (n === 1 ? ' trade' : ' trades') + ' this session';
+    const n = s.executor_all_time_trades || 0;
+    tradeCountEl.textContent = n + (n === 1 ? ' trade' : ' trades') + ' all-time';
   }
 
   const posEl    = document.getElementById('exec-position');
@@ -807,15 +812,14 @@ function renderAccuracy(s) {
   document.getElementById('acc-session-sub').textContent =
     `${s.session_pred_correct || 0} / ${s.session_pred_total || 0} markets`;
 
-  const logs = (s.event_log || []).filter(l => l.includes('Window closed:'));
-  if (logs.length) {
-    document.getElementById('resolution-log').innerHTML = logs.slice(0, 10).map(line => {
+  const resolutions = s.resolution_history || (s.event_log || []).filter(l => l.includes('Window closed:'));
+  if (resolutions.length) {
+    document.getElementById('resolution-log').innerHTML = resolutions.slice(0, 15).map(line => {
       const body      = line.replace(/^\[[\d:]+\]\s*/, '').replace('Window closed: ', '');
       const isCorrect = body.includes('CORRECT');
       const isWrong   = body.includes('WRONG');
-      const isYes     = body.includes('→ YES');
-      const isNo      = body.includes('→ NO');
-      const color     = isCorrect ? 'var(--green)' : isWrong ? 'var(--red)' : isYes ? 'var(--green)' : isNo ? 'var(--red)' : 'var(--muted)';
+      const hasModel  = body.includes('model=') || body.includes('slope=');
+      const color     = isCorrect ? 'var(--green)' : isWrong ? 'var(--red)' : 'var(--muted)';
       return `<div style="color:${color}">${escHtml(body)}</div>`;
     }).join('');
   }
