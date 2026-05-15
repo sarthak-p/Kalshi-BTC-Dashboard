@@ -29,8 +29,7 @@ class Executor:
         self.state  = state
         self.cfg    = cfg
         self.logger = logger
-        self._traded: set[str] = set()
-        self._stop_lossed: set[str] = set()  # one stop-loss allowed per contract
+        self._traded: set[str] = set()  # kept for live_order error recovery
 
     async def startup(self) -> None:
         """Call once at boot. In live mode, seeds executor_bankroll from Kalshi."""
@@ -38,6 +37,7 @@ class Executor:
             balance = await self._fetch_kalshi_balance()
             if balance is not None:
                 self.state.executor_bankroll = balance
+                self.state.executor_bankroll_initial = balance
                 self.state._save_executor_bankroll()
                 await self.state.log_event(
                     f"💰 Live mode — Kalshi balance: ${balance:.2f}"
@@ -47,9 +47,17 @@ class Executor:
                     "⚠ Live mode — could not fetch Kalshi balance, using persisted value"
                 )
         else:
-            await self.state.log_event(
-                f"📄 Paper mode — starting balance: ${self.state.executor_bankroll:.2f}"
-            )
+            if self.cfg.paper_bankroll_reset > 0:
+                self.state.executor_bankroll = self.cfg.paper_bankroll_reset
+                self.state.executor_bankroll_initial = self.cfg.paper_bankroll_reset
+                self.state._save_executor_bankroll()
+                await self.state.log_event(
+                    f"📄 Paper mode — balance reset to ${self.cfg.paper_bankroll_reset:.2f}"
+                )
+            else:
+                await self.state.log_event(
+                    f"📄 Paper mode — starting balance: ${self.state.executor_bankroll:.2f}"
+                )
 
     async def sync_balance(self) -> None:
         """Re-fetch Kalshi balance after settlement (live mode only)."""
@@ -62,125 +70,84 @@ class Executor:
             self.state._dirty.set()
 
     async def maybe_trade(self) -> None:
-        """Called every analysis tick. Fires at most once per contract window."""
-        rec      = self.state.recommendation
-        analysis = self.state.analysis
+        """Bias follower: enter or reverse based on technical bias. No gates, no signal voting."""
         contract = self.state.active_contract
-
         if not contract:
             return
-        if analysis.get("phase") != "entry_open":
-            return
-        if rec["side"] is None:
-            return
-        if contract in self._traded:
+
+        bias = self.state.pre_window_bias
+        if bias == "neutral":
             return
 
-        # An edge gate (commitment rate, GBM gap, price cap) explicitly blocked this
-        # recommendation. The 60-second lock may have restored the display side, but the
-        # underlying condition that blocked it is still active — don't trade.
-        if rec.get("edge_gate_blocked"):
+        target_side = "YES" if bias == "up" else "NO"
+
+        # Only trade when GBM agrees with the technical bias
+        fv = self.state.prediction_yes_pct
+        if target_side == "YES" and fv <= 55:
+            return  # GBM not leaning YES — skip
+        if target_side == "NO" and fv >= 45:
+            return  # GBM not leaning NO — skip
+
+        pos = self.state.position
+        in_contract = pos["status"] == "open" and pos["ticker"] == contract
+
+        # Already holding the right side — nothing to do
+        if in_contract and pos["side"] == target_side:
             return
 
-        # Require the signal to have been stable for at least 30 seconds before trading.
-        # This prevents entering on a single-tick spike (e.g. a dead-cat bounce to 95% GBM).
-        lock_ts = getattr(self.state, "recommendation_lock_ts", 0.0)
-        if time.time() - lock_ts < 30.0:
+        # Bias switched — close current position at market before reversing
+        if in_contract and pos["side"] != target_side:
+            await self._paper_close_bias_switch(contract, pos)
+
+        # Enter at current market price, no filtering
+        ob = self.state.orderbook
+        if target_side == "YES":
+            price = ob.best_ask()
+        else:
+            yes_bid = ob.best_bid()
+            price = (100.0 - yes_bid) if yes_bid is not None else None
+
+        if not price:
             return
 
-        side       = rec["side"]
-        sizing     = rec.get("sizing", {})
-        contracts  = sizing.get("contracts", 0)
-        fill_price = rec.get("entry_price")
-
-        if fill_price is None:
-            await self.state.log_event(
-                f"⚠ No trade ({side}): recommendation has no entry price"
-            )
-            return
-
-        if contracts <= 0:
-            from strategy.scalper import _kelly_position_size
-            sizing = _kelly_position_size(
-                bankroll=self.state.executor_bankroll,
-                entry_price_cents=fill_price,
-                win_probability=self.state._pred_accuracy(lifetime=False) or 0.91,
-            )
-            contracts = sizing.get("contracts", 0)
-
-        if contracts <= 0:
-            reason = sizing.get("reason", "insufficient edge or bankroll")
-            await self.state.log_event(
-                f"⚠ No trade ({side} @ {fill_price:.1f}¢): Kelly says skip — {reason}"
-            )
-            return
-
-        self._traded.add(contract)
+        n_contracts = max(1, int(self.state.executor_bankroll * 0.10 / (price / 100.0)))
 
         if self.cfg.trading_mode == "paper":
-            await self._paper_fill(contract, rec["side"], contracts, fill_price)
-        else:
-            await self._live_order(contract, rec["side"], contracts, fill_price)
+            await self._paper_fill(contract, target_side, n_contracts, price)
 
-    # ── Stop-loss ─────────────────────────────────────────────────────────────
+    # ── Bias switch close ─────────────────────────────────────────────────────
 
     async def maybe_stop_loss(self) -> None:
-        """
-        Called every tick before maybe_trade. Sells an open position early when
-        GBM strongly flips against it, then clears the trade lock so maybe_trade
-        can immediately re-enter in the opposite direction if edge conditions allow.
+        """Not used in bias-follower mode — reversals are handled in maybe_trade."""
+        pass
 
-        Guards:
-          - GBM must oppose the position (≤35% for YES, ≥65% for NO)
-          - ≥180 s must remain — too late to act in the last 3 min
-          - Sell price must be ≥8¢ — don't sell for scraps into a one-sided book
-          - One stop-loss per contract per session
-
-        Threshold is ≤35%/≥65% (not ≤15%/≥85%) so we exit while the sell price
-        is still reasonable (~30-35¢) rather than waiting until the market has
-        fully repriced to 85%+ and we can only recover 10-13¢.
-        """
-        pos = self.state.position
-        if pos["status"] != "open":
-            return
-
-        contract = pos["ticker"]
-        if not contract or contract in self._stop_lossed:
-            return
-
-        tau = max(0.0, self.state.window_close_ts - time.time())
-        if tau < 180.0:
-            return
-
-        fv   = self.state.prediction_yes_pct
+    async def _paper_close_bias_switch(self, ticker: str, pos: dict) -> None:
+        """Close an open paper position at market when bias switches direction."""
         side = pos["side"]
-        gbm_opposes = (
-            (side == "YES" and fv <= 35.0) or
-            (side == "NO"  and fv >= 65.0)
-        )
-        if not gbm_opposes:
-            return
-
-        ob = self.state.orderbook
+        ob   = self.state.orderbook
         if side == "YES":
             sell_price = ob.best_bid()
         else:
-            yes_ask = ob.best_ask()
+            yes_ask    = ob.best_ask()
             sell_price = (100.0 - yes_ask) if yes_ask is not None else None
 
-        if sell_price is None or sell_price < 8.0:
-            return  # book too thin to exit safely
+        if sell_price is None:
+            sell_price = pos["fill_price"]  # fallback to fill price if book is empty
 
-        contracts  = pos["contracts"]
-        fill_price = pos["fill_price"]
-
-        self._stop_lossed.add(contract)
-        self._traded.discard(contract)  # allow re-entry in opposite direction
-
-        if self.cfg.trading_mode == "paper":
-            await self._paper_stop_loss(contract, side, contracts, fill_price, sell_price)
-        else:
-            await self._live_stop_loss(contract, side, contracts, fill_price, sell_price)
+        await self.state.stop_position(ticker, sell_price)
+        pnl = self.state.position["pnl"]
+        await self.state.log_event(
+            f"🔄 BIAS SWITCH — closed {side}  {pos['contracts']} × {pos['fill_price']:.1f}¢ "
+            f"→ {sell_price:.1f}¢  PnL ${pnl:+.2f}  balance ${self.state.executor_bankroll:.2f}"
+        )
+        await self.logger.log("bias_switch", {
+            "ticker":     ticker,
+            "side":       side,
+            "contracts":  pos["contracts"],
+            "fill_price": pos["fill_price"],
+            "sell_price": sell_price,
+            "pnl":        pnl,
+        })
 
     async def _paper_stop_loss(
         self, ticker: str, side: str, contracts: int, fill_price: float, sell_price: float

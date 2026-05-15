@@ -96,6 +96,7 @@ class StateManager:
 
         # Contract / window
         self.active_contract: Optional[str] = None
+        self.bias_at_discovery: str = "neutral"
         self.window_close_ts: float = 0.0
         self.window_open_ts: float = 0.0
         self.window_discovered_ts: float = 0.0
@@ -194,7 +195,9 @@ class StateManager:
         }
         # Separate P&L for executor trades (paper or live)
         self.executor_bankroll: float = self._load_executor_bankroll(default=starting_bankroll)
+        self.executor_bankroll_initial: float = self.executor_bankroll  # frozen at session start
         self.executor_session_pnl: float = 0.0
+        self.executor_session_trades: int = 0
 
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
@@ -264,6 +267,7 @@ class StateManager:
             self.window_close_ts = close_ts
             self.window_open_ts = open_ts
             self.window_discovered_ts = time.time()
+            self.bias_at_discovery = self.pre_window_bias if self.tech_fetched else "unknown"
             self.open_interest = open_interest
             self.btc_open = 0.0
             if self.btc_price > 0:
@@ -284,12 +288,16 @@ class StateManager:
         self, rsi: float, adx: float, bb_position: float, bb_width: float, bias: str
     ) -> None:
         async with self._lock:
+            first_fetch = not self.tech_fetched
             self.tech_rsi = rsi
             self.tech_adx = adx
             self.tech_bb_position = bb_position
             self.tech_bb_width = bb_width
             self.pre_window_bias = bias
             self.tech_fetched = True
+            # Backfill discovery bias if we just got our first read and a contract is already active
+            if first_fetch and self.active_contract and self.bias_at_discovery == "unknown":
+                self.bias_at_discovery = bias
         self._dirty.set()
 
     async def update_prediction(self, yes_pct: float, predicted_close: float = 0.0) -> None:
@@ -344,6 +352,7 @@ class StateManager:
         self, ticker: str, side: str, contracts: int, fill_price: float, mode: str
     ) -> None:
         async with self._lock:
+            self.executor_session_trades += 1
             self.position = {
                 "ticker":     ticker,
                 "side":       side,
@@ -558,8 +567,10 @@ class StateManager:
             # Executor position + P&L
             "trading_mode":         self.trading_mode,
             "position":             dict(self.position),
-            "executor_bankroll":    round(self.executor_bankroll, 2),
-            "executor_session_pnl": round(self.executor_session_pnl, 2),
+            "executor_bankroll":         round(self.executor_bankroll, 2),
+            "executor_bankroll_initial": round(self.executor_bankroll_initial, 2),
+            "executor_session_pnl":      round(self.executor_session_pnl, 2),
+            "executor_session_trades":   self.executor_session_trades,
         }
 
     def _pred_accuracy(self, lifetime: bool = True) -> float:

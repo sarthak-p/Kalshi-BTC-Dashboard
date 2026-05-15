@@ -149,8 +149,9 @@ async def _fetch_okx_sentiment() -> Optional[tuple[float, float]]:
 def _classify(rsi: float, bb_pos: float, adx: float = 25.0) -> str:
     if adx < 20:
         return "neutral"   # choppy market — don't trust RSI/BB signals
-    bull = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
-    bear = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
+    # Trend-continuation: RSI > 60 = sustained buying momentum; RSI < 40 = sustained selling
+    bull = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
+    bear = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
     if bull >= 1 and bull > bear:
         return "up"
     if bear >= 1 and bear > bull:

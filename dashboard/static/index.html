@@ -187,7 +187,7 @@ body {
         <div class="metric-card">
           <div class="metric-label">Bot Session P&L</div>
           <div class="metric-value" id="exec-session-pnl">—</div>
-          <div class="metric-sub">trades this session</div>
+          <div class="metric-sub" id="exec-session-trades-sub">0 trades this session</div>
         </div>
 
         <div class="metric-card" style="grid-column:span 2">
@@ -389,17 +389,24 @@ function renderExecutor(s) {
   });
 
   const balEl = document.getElementById('exec-balance');
+  const initBal = s.executor_bankroll_initial != null ? s.executor_bankroll_initial : execBal;
   if (balEl) {
     balEl.textContent = '$' + execBal.toFixed(2);
-    balEl.style.color = execBal >= 166.58 ? 'var(--green)' : 'var(--red)';
+    balEl.style.color = execBal >= initBal ? 'var(--green)' : 'var(--red)';
+    const allTimeDelta = execBal - initBal;
     document.getElementById('exec-balance-sub').textContent =
-      (execBal - 211.99 >= 0 ? '+' : '') + '$' + (execBal - 211.99).toFixed(2) + ' all-time';
+      (allTimeDelta >= 0 ? '+' : '') + '$' + allTimeDelta.toFixed(2) + ' this session';
   }
 
   const pnlEl = document.getElementById('exec-session-pnl');
   if (pnlEl) {
     pnlEl.textContent = (execPnl >= 0 ? '+' : '') + '$' + execPnl.toFixed(2);
     pnlEl.style.color = execPnl > 0 ? 'var(--green)' : execPnl < 0 ? 'var(--red)' : 'var(--muted)';
+  }
+  const tradeCountEl = document.getElementById('exec-session-trades-sub');
+  if (tradeCountEl) {
+    const n = s.executor_session_trades || 0;
+    tradeCountEl.textContent = n + (n === 1 ? ' trade' : ' trades') + ' this session';
   }
 
   const posEl    = document.getElementById('exec-position');
@@ -421,7 +428,15 @@ function renderExecutor(s) {
   } else if (status === 'open') {
     posEl.textContent = modeIcon + ' ' + pos.side + '  ' + pos.contracts + ' contracts @ ' + (pos.fill_price || 0).toFixed(1) + '¢';
     posEl.style.color = pos.side === 'YES' ? 'var(--green)' : 'var(--red)';
-    posSubEl.textContent = 'cost $' + (pos.cost || 0).toFixed(2) + '  ·  waiting for settlement';
+    const mid = s.orderbook && s.orderbook.mid != null ? s.orderbook.mid : null;
+    if (mid != null && pos.contracts && pos.cost != null) {
+      const exitPrice = pos.side === 'YES' ? mid : (100 - mid);
+      const unrealized = (pos.contracts * exitPrice / 100) - pos.cost;
+      const uSign = unrealized >= 0 ? '+' : '';
+      posSubEl.textContent = 'cost $' + (pos.cost || 0).toFixed(2) + '  ·  unrealized ' + uSign + '$' + unrealized.toFixed(2);
+    } else {
+      posSubEl.textContent = 'cost $' + (pos.cost || 0).toFixed(2) + '  ·  waiting for settlement';
+    }
   } else if (status === 'won') {
     posEl.textContent = '✓  WON  +$' + (pos.pnl || 0).toFixed(2);
     posEl.style.color = 'var(--green)';
@@ -531,7 +546,7 @@ function renderMarketConditions(s) {
     const adx = tech.adx;
     document.getElementById('adx-val').textContent = adx.toFixed(1);
     document.getElementById('adx-val').style.color = adx > 30 ? 'var(--green)' : adx < 20 ? 'var(--yellow)' : 'var(--text)';
-    document.getElementById('adx-label').textContent = adx > 30 ? 'trending — 3 signals needed' : adx < 20 ? 'choppy — 4 signals needed' : 'moderate';
+    document.getElementById('adx-label').textContent = adx > 30 ? 'strong trend — RSI/BB reliable' : adx < 20 ? 'choppy — RSI/BB signals suppressed' : 'moderate trend';
   }
 
   // Pre-window bias

@@ -137,15 +137,15 @@ def _cvd_signal(cvd_window: float, cvd_total: float, btc_change: float = 0.0) ->
     ratio = cvd_window / cvd_total
 
     # Confirmed momentum
-    if ratio > 0.08 and btc_change >= 0:
+    if ratio > 0.15 and btc_change >= 0:
         return "YES"   # buying + rising = confirmed bull momentum
-    if ratio < -0.08 and btc_change <= 0:
+    if ratio < -0.15 and btc_change <= 0:
         return "NO"    # selling + falling = confirmed bear momentum
 
     # Absorption signals (divergence = large participant in control)
-    if ratio < -0.08 and btc_change > 0:
+    if ratio < -0.15 and btc_change > 0:
         return "YES"   # selling but price rising = absorption, strong buyer
-    if ratio > 0.08 and btc_change < 0:
+    if ratio > 0.15 and btc_change < 0:
         return "NO"    # buying but price falling = distribution, strong seller
 
     return None
@@ -223,18 +223,52 @@ def _compute_recommendation(
     max_entry_price_cents: float = 65.0,
 ) -> dict:
     basis = []
-    edge_gate_blocked = False  # set True if any hard edge gate fires — executor must not trade
+    edge_gate_blocked = False
 
-    if fv > 58:
+    # ── Primary signals: GBM + technicals ────────────────────────────────────
+    if fv > 55:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 42:
+    elif fv < 45:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
         model_side = None
         basis.append(f"GBM: {fv:.0f}% (neutral)")
 
+    if bias == "up":
+        bias_side = "YES"
+        basis.append("Technicals: bullish (RSI/BB)")
+    elif bias == "down":
+        bias_side = "NO"
+        basis.append("Technicals: bearish (RSI/BB)")
+    else:
+        bias_side = None
+
+    # Primary rule: both GBM and technicals must agree
+    if model_side is not None and bias_side == model_side:
+        side = model_side
+    else:
+        side = None
+        if model_side is not None and bias_side is not None and model_side != bias_side:
+            basis.append(f"Technicals: {bias} — conflicts with GBM")
+        elif model_side is None and bias_side is not None:
+            basis.append(f"Technicals: {bias} — GBM neutral, waiting for price to commit")
+        elif model_side is not None and bias_side is None:
+            basis.append("Technicals: neutral — waiting for RSI/BB signal")
+        else:
+            basis.append("Technicals: neutral")
+
+    # Entry price for the recommended side
+    if side == "YES":
+        entry_price = ob.best_ask()
+    elif side == "NO":
+        bb = ob.best_bid()
+        entry_price = (100.0 - bb) if bb is not None else None
+    else:
+        entry_price = None
+
+    # ── Supporting signals (informational — shown in dashboard) ───────────────
     if btc_change >= momentum_usd * 1.1:
         btc_side = "YES"
         basis.append(f"BTC: +${btc_change:.0f} bullish")
@@ -244,16 +278,6 @@ def _compute_recommendation(
     else:
         btc_side = None
         basis.append(f"BTC: ${btc_change:+.0f} (< ${momentum_usd * 1.1:.0f} threshold)")
-
-    if bias == "up":
-        bias_side = "YES"
-        basis.append("Technicals: bullish (RSI/BB)")
-    elif bias == "down":
-        bias_side = "NO"
-        basis.append("Technicals: bearish (RSI/BB) [confirm-only]")
-    else:
-        bias_side = None
-        basis.append("Technicals: neutral")
 
     cvd_side = _cvd_signal(cvd_window, cvd_total, btc_change)
     if cvd_side == "YES":
@@ -265,7 +289,6 @@ def _compute_recommendation(
     else:
         basis.append("CVD: neutral / insufficient volume")
 
-     # Funding rate signal
     if funding_pct > 0.01:
         funding_side = "NO"
         basis.append(f"Funding: +{funding_pct:.4f}% (crowded longs)")
@@ -276,7 +299,6 @@ def _compute_recommendation(
         funding_side = None
         basis.append(f"Funding: {funding_pct:.4f}% (neutral)")
 
-    # Orderbook imbalance signal
     imb = ob.imbalance()
     if imb is not None and imb > 0.20:
         imbalance_side = "YES"
@@ -288,7 +310,6 @@ def _compute_recommendation(
         imbalance_side = None
         basis.append(f"OB imbalance: {f'{imb:+.2f}' if imb is not None else 'n/a'} (neutral)")
 
-    # Kalshi mid momentum signal
     kalshi_momentum_side = None
     if kalshi_mid_history and len(kalshi_mid_history) >= 10:
         now_ts = kalshi_mid_history[-1][0]
@@ -304,93 +325,54 @@ def _compute_recommendation(
             else:
                 basis.append(f"Kalshi mid: flat ({slope:+.3f}¢/s)")
 
-    dominant = "YES" if model_side == "YES" or btc_side == "YES" else "NO" if model_side == "NO" or btc_side == "NO" else None
-    confirmatory_bias = bias_side if bias_side == dominant else None
-    signals = [model_side, btc_side, confirmatory_bias, cvd_side]
-    yes_count = signals.count("YES")
-    no_count  = signals.count("NO")
-
-    # Bonus confirmatory signals — can only add to the leading side, never subtract
-    bonus = [funding_side, imbalance_side, kalshi_momentum_side]
-    if yes_count > no_count:
-        yes_count += sum(1 for s in bonus if s == "YES")
-    elif no_count > yes_count:
-        no_count += sum(1 for s in bonus if s == "NO")
-
-    # Require 3+ signals aligned; in choppy markets (ADX < 20) all 4 must agree
-    min_signals = 4 if adx < 20 else 3
-
-    if yes_count >= min_signals and yes_count > no_count:
-        side = "YES"
-        entry_price = ob.best_ask()
-    elif no_count >= min_signals and no_count > yes_count:
-        side = "NO"
-        bb = ob.best_bid()
-        entry_price = (100.0 - bb) if bb is not None else None
+    # Count supporting signals that agree with the recommended side (informational)
+    supporting = [btc_side, cvd_side, funding_side, imbalance_side, kalshi_momentum_side]
+    if side is not None:
+        agree_count = sum(1 for s in supporting if s == side)
+        disagree_count = sum(1 for s in supporting if s is not None and s != side)
+        if agree_count or disagree_count:
+            basis.append(f"Supporting: {agree_count} confirm, {disagree_count} oppose")
     else:
-        side = None
-        entry_price = None
+        agree_count = 0
 
-    # ── Edge gate 1: commitment rate ─────────────────────────────────────────
-    # Require |btc_change| / tau_seconds >= threshold so we don't trade small,
-    # undecided moves early in the window when anything can still happen.
+    # ── Warnings (informational — don't block recommendation) ─────────────────
     if side is not None and tau_seconds > 30.0:
         rate = abs(btc_change) / tau_seconds
         if rate < min_commitment_rate:
             basis.append(
-                f"⛔ Commitment {rate:.2f}$/s < {min_commitment_rate:.2f}$/s "
-                f"(${abs(btc_change):.0f} move with {tau_seconds:.0f}s left)"
+                f"⚠ Low commitment: ${abs(btc_change):.0f} over {tau_seconds:.0f}s "
+                f"({rate:.2f}$/s)"
             )
-            side = None
-            entry_price = None
-            edge_gate_blocked = True
 
-    # ── Edge gate 2: GBM vs market gap ───────────────────────────────────────
-    # Only trade when our GBM probability meaningfully disagrees with what
-    # Kalshi is already pricing — otherwise we have no edge over the market.
     if side is not None:
-        kalshi_mid_price = ob.mid()
-        if kalshi_mid_price is not None:
-            gap = fv - kalshi_mid_price  # positive = GBM > market (YES underpriced)
-            if side == "YES" and gap < min_gbm_market_gap_cents:
+        mid_price = ob.mid()
+        if mid_price is not None:
+            gap = fv - mid_price
+            gap_val = gap if side == "YES" else -gap
+            if gap_val < min_gbm_market_gap_cents:
                 basis.append(
-                    f"⛔ No edge: GBM {fv:.0f}¢ vs market {kalshi_mid_price:.0f}¢ "
-                    f"(gap {gap:+.1f}¢, need +{min_gbm_market_gap_cents:.0f}¢)"
+                    f"⚠ Small edge: GBM {fv:.0f}¢ vs market {mid_price:.0f}¢ "
+                    f"(gap {gap_val:+.1f}¢)"
                 )
-                side = None
-                entry_price = None
-                edge_gate_blocked = True
-            elif side == "NO" and -gap < min_gbm_market_gap_cents:
-                basis.append(
-                    f"⛔ No edge: GBM {fv:.0f}¢ vs market {kalshi_mid_price:.0f}¢ "
-                    f"(gap {-gap:+.1f}¢, need +{min_gbm_market_gap_cents:.0f}¢)"
-                )
-                side = None
-                entry_price = None
-                edge_gate_blocked = True
 
-    # ── Edge gate 3: entry price range ───────────────────────────────────────
-    # Refuse trades where risk/reward is inverted. At 75¢ you risk 75¢ to win
-    # 25¢ — one reversal wipes 3x the potential gain. Sweet spot is 8–65¢
-    # where you're getting paid meaningfully to take the risk.
+    # ── Hard gate: entry price range (risk/reward) ────────────────────────────
     if side is not None and entry_price is not None:
         if entry_price < min_entry_price_cents:
             basis.append(
-                f"⛔ Entry {entry_price:.1f}¢ too cheap (min {min_entry_price_cents:.0f}¢) "
-                f"— market is near-certain, fighting strong consensus"
+                f"⛔ Entry {entry_price:.1f}¢ too cheap — market near-certain"
             )
             side = None
             entry_price = None
+            edge_gate_blocked = True
         elif entry_price > max_entry_price_cents:
             basis.append(
-                f"⛔ Entry {entry_price:.1f}¢ too expensive (max {max_entry_price_cents:.0f}¢) "
-                f"— risk {entry_price:.0f}¢ to win only {100 - entry_price:.0f}¢"
+                f"⛔ Entry {entry_price:.1f}¢ too expensive "
+                f"(risk {entry_price:.0f}¢ to win {100 - entry_price:.0f}¢)"
             )
             side = None
             entry_price = None
             edge_gate_blocked = True
 
-    # Add bankroll and accuracy as parameters passed in from analyzer
     sizing = _kelly_position_size(
         bankroll=bankroll,
         entry_price_cents=entry_price or 0.0,
@@ -400,8 +382,8 @@ def _compute_recommendation(
     return {
         "side": side,
         "entry_price": round(entry_price, 1) if entry_price is not None else None,
-        "confidence": round(max(yes_count, no_count) / 7.0, 2),
-        "signal_count": max(yes_count, no_count),
+        "confidence": round((2 + agree_count) / 7.0, 2) if side else 0.0,
+        "signal_count": agree_count,
         "basis": basis,
         "sizing": sizing,
         "edge_gate_blocked": edge_gate_blocked,
@@ -608,7 +590,7 @@ class Analyzer:
     async def _bias_refresher(self) -> None:
         while True:
             await self._refresh_bias()
-            await asyncio.sleep(60.0)
+            await asyncio.sleep(15.0)
 
     async def _refresh_bias(self) -> None:
         from strategy.technicals import fetch_bias, fetch_market_sentiment
@@ -668,6 +650,7 @@ class Analyzer:
                 predicted_dir=self.state.prediction_locked_direction,
                 prediction_yes_pct=self.state.prediction_yes_pct,
                 pre_window_bias=self.state.pre_window_bias,
+                bias_at_discovery=self.state.bias_at_discovery,
                 predicted_resolution=self.state.predicted_resolution,
                 tech_adx=self.state.tech_adx,
             ))
@@ -680,6 +663,7 @@ class Analyzer:
         predicted_dir: str,
         prediction_yes_pct: float,
         pre_window_bias: str,
+        bias_at_discovery: str = "neutral",
         predicted_resolution: str = "NEUTRAL",
         tech_adx: float = 0.0,
     ) -> None:
@@ -754,6 +738,23 @@ class Analyzer:
             "resolution_pred_correct": resolution_pred_correct,
             "adx": round(tech_adx, 1),
         })
+
+        # ── Technicals discovery-time log ─────────────────────────────────────────
+        if resolution in ("YES", "NO"):
+            import csv as _csv, os as _os
+            _path = _os.path.join("logs", "technicals_discovery.csv")
+            _write_header = not _os.path.exists(_path)
+            with open(_path, "a", newline="") as _f:
+                _w = _csv.writer(_f)
+                if _write_header:
+                    _w.writerow(["date_utc", "ticker", "bias_at_discovery", "resolution"])
+                import datetime as _dt
+                _w.writerow([
+                    _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+                    ticker,
+                    bias_at_discovery,
+                    resolution,
+                ])
 
         # ── Sizing + bankroll update ──────────────────────────────────────────────
         entry_price_used = self.state.recommendation.get("entry_price") or 68.0

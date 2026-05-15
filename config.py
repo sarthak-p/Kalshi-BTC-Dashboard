@@ -43,11 +43,11 @@ class Settings(BaseSettings):
     max_entry_price_cents: float = Field(default=85.0, env="MAX_ENTRY_PRICE_CENTS")
 
     # ── BTC momentum threshold for recommendation ─────────────────────────────
-    momentum_entry_usd: float = Field(default=30.0, env="MOMENTUM_ENTRY_USD")
+    momentum_entry_usd: float = Field(default=20.0, env="MOMENTUM_ENTRY_USD")
 
     # ── Edge filters (only trade when there's a real edge over the market) ────
     # Minimum |btc_change| / tau_seconds — filters out small undecided moves early in window
-    min_commitment_rate: float = Field(default=0.20, env="MIN_COMMITMENT_RATE")
+    min_commitment_rate: float = Field(default=0.08, env="MIN_COMMITMENT_RATE")
     # Minimum gap between GBM probability and Kalshi mid price (cents)
     # Ensures we only trade when our model disagrees meaningfully with the market
     min_gbm_market_gap_cents: float = Field(default=8.0, env="MIN_GBM_MARKET_GAP_CENTS")
@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     kalshi_ws_base: str = Field(default="", env="KALSHI_WS_BASE")
 
     bankroll: float = Field(default=250.0, env="BANKROLL")
+    # Set PAPER_BANKROLL_RESET to a positive value to override the persisted paper balance on startup.
+    # Remove or set to 0 after restarting to resume normal persistence.
+    paper_bankroll_reset: float = Field(default=0.0, env="PAPER_BANKROLL_RESET")
 
     # ── Executor ─────────────────────────────────────────────────────────────
     trading_mode: Literal["paper", "live"] = Field(default="paper", env="TRADING_MODE")

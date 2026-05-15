@@ -1,6 +1,6 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Automated trading bot for Kalshi BTC 15-minute binary markets. Runs a drift-adjusted GBM fair-value model, votes across seven independent signals, and places real or simulated orders when a genuine edge over the market price is detected.
+Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model combined with RSI/BB technical bias to decide direction, and places simulated or real orders when both signals agree.
 
 Switch between paper (simulated) and live (real money) by changing one line in `.env`.
 
@@ -15,86 +15,67 @@ Each `KXBTC15M` contract is a binary that pays **$1.00 if BTC closes at or above
 
 Kalshi settles using CF Benchmarks' BRTI (averaged over the 60 seconds before close) — not Coinbase spot. The bot queries the Kalshi settlement API for the official result.
 
-Once a position is placed it rides to settlement — there is no liquid secondary market to exit into. The stop-loss feature (see below) is the only mid-window risk management available.
+---
+
+## How the bot decides to trade
+
+The executor uses a simple two-signal rule:
+
+1. **Technical bias** (RSI/BB from Coinbase 1-min candles) must have a directional view — `up` or `down`. If ADX < 20 the market is choppy and RSI/BB signals are suppressed → bias stays neutral → no trade.
+2. **GBM fair value** must agree with the bias — GBM > 55% for YES, < 45% for NO.
+
+When both agree, the bot enters that side at the current market price using **10% of the executor bankroll**. When bias switches direction mid-window, the current position is closed at market and a new one opened in the opposite direction.
+
+There is no stop-loss — the bias reversal mechanism handles mid-window risk.
 
 ---
 
-## The edge
+## The GBM model
 
-Most Kalshi participants price contracts based on where BTC **is right now**. This model prices them based on where BTC **is going** — by incorporating BTC's current velocity (slope) into the GBM fair value.
+The GBM (Geometric Brownian Motion) model prices the probability that BTC closes above the window-open strike. It incorporates:
 
-Example: BTC is -$80 from strike with 350s left, but rising at $1.20/s. The crowd sees -$80 and prices YES at 28¢. The drift-adjusted GBM says YES is worth 52¢ (BTC will cross the strike in ~67 seconds at this rate). That 24¢ mispricing gap is the edge. The bot buys YES at 28¢.
+- Current BTC price vs strike
+- Time remaining in the window
+- Current BTC velocity (slope of recent price) — so a fast-rising BTC scores higher even if still below strike
+- Volatility from Deribit DVOL (implied vol), or rolling realized vol as fallback
 
-Two hard filters enforce that a real edge exists before any order is placed:
-
-1. **Commitment rate** — `|BTC move| / seconds_remaining ≥ 0.15 $/s`. Prevents trading on small, undecided moves where the market can easily reverse.
-2. **GBM-market gap** — our fair value must differ from the Kalshi mid by ≥ 8¢. If the market is already pricing what our model sees, there is nothing to exploit.
-3. **Entry price cap** — never pay more than 65¢ for any contract. Above 65¢ you risk 65¢+ to win 35¢ or less; one reversal wipes multiple potential gains.
-
----
-
-## Signal system
-
-The bot votes across seven signals. Four are **core votes**; three are **confirmatory** (can only strengthen the leading side, never create or flip a recommendation).
-
-| # | Signal | Source | Threshold |
-|---|--------|--------|-----------|
-| 1 | **GBM fair value** | Live BTC + DVOL | > 58% → YES, < 42% → NO |
-| 2 | **BTC momentum** | Coinbase spot | > $44 move → bullish; < −$44 → bearish |
-| 3 | **Technical bias** | Coinbase 1-min candles | RSI/BB consensus, neutral if ADX < 20 |
-| 4 | **CVD (order flow)** | Coinbase trade stream | Net buy volume > 8% of window total |
-| 5 | **Funding rate** *(bonus)* | OKX perp | Crowded longs → NO lean; crowded shorts → YES lean |
-| 6 | **Orderbook imbalance** *(bonus)* | Kalshi order book | Bid-heavy → YES; ask-heavy → NO |
-| 7 | **Kalshi mid momentum** *(bonus)* | Kalshi mid price | Rising slope > 0.05¢/s → YES |
-
-**Vote threshold**: ≥ 3 core signals aligned in trending markets (ADX ≥ 20), all 4 in choppy markets (ADX < 20). Technicals only count when they agree with whatever GBM + momentum already say — they cannot flip the direction on their own.
-
-**60-second flip lock**: once a side is recommended, it is held for 60 seconds to prevent oscillation. The lock releases immediately if GBM drops to ≤ 10% (floor against YES lock) or ≥ 90% (floor against NO lock).
+Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The bot sees that gap and, if technicals also say bullish, buys YES.
 
 ---
 
-## When the bot places an order
+## Technical bias (RSI/BB)
 
-All conditions must be true simultaneously on the same analysis tick (runs every 50 ms):
+Fetched every **15 seconds** from Coinbase Exchange 1-minute candles (no auth required). Three indicators are computed:
 
-1. Phase is **`entry_open`** — between 240 s and 900 s remaining (4–15 min before close)
-2. The 4-signal vote produces a clear side (YES or NO)
-3. Commitment rate filter passes (`|move| / tau ≥ 0.15 $/s`)
-4. GBM-market gap filter passes (`|fv − mid| ≥ 8¢`)
-5. Entry price is within 8–65¢
-6. Kelly sizing produces ≥ 1 contract
-7. This contract has not already been traded this window (one order per 15-min window)
+| Indicator | Bullish condition | Bearish condition |
+|-----------|------------------|------------------|
+| RSI(14) | > 60 | < 40 |
+| Bollinger Band position | > 0.6 (near upper band) | < 0.4 (near lower band) |
+| ADX(14) | must be ≥ 20 for any signal to count | < 20 → all signals suppressed |
 
-**Kelly position sizing** (half-Kelly, 15% bankroll cap):
-```
-kelly_pct = (p × profit_per_dollar − (1−p)) / profit_per_dollar
-```
-where `p` is the session model accuracy (falls back to 0.91 if no session data yet). Half-Kelly is used to reduce variance. The position is capped at 15% of the executor bankroll per trade.
+**ADX < 20 means the market is choppy** — RSI and BB give false signals in sideways markets so the bias is forced to neutral regardless of RSI/BB values.
+
+Bias logic: if at least one of RSI or BB fires in the same direction (and ADX ≥ 20), that direction wins. If they conflict or both are neutral, bias = neutral.
 
 ---
 
-## Stop-loss
+## Recommendation panel
 
-Because positions cannot be exited freely on Kalshi, the bot monitors open positions every tick and will sell mid-window if GBM strongly flips against the trade.
+The dashboard recommendation fires when GBM and technicals agree. Supporting signals are shown as informational context:
 
-**Stop-loss fires when all four guards pass:**
+| Signal | Source | Role |
+|--------|--------|------|
+| **GBM fair value** | Live BTC + DVOL | Primary — must agree with technicals |
+| **Technical bias** | Coinbase 1-min candles | Primary — must agree with GBM |
+| BTC momentum | Coinbase spot | Informational |
+| CVD (order flow) | Coinbase trade stream | Informational |
+| Funding rate | OKX perp | Informational |
+| Orderbook imbalance | Kalshi order book | Informational |
+| Kalshi mid momentum | Kalshi mid price history | Informational |
 
-| Guard | Threshold |
-|-------|-----------|
-| Position is open | status == open |
-| GBM opposes | ≤ 35% YES for a YES position; ≥ 65% YES for a NO position |
-| Time remaining | ≥ 180 s (3 min) — not worth the spread cost with less time |
-| Sell price floor | ≥ 8¢ — don't exit into a one-sided book for scraps |
+**Hard gate** (only thing that blocks the recommendation): entry price must be within 8–65¢. Below 8¢ the market is near-certain with no value to capture. Above 65¢ you risk more than you can win.
 
-The 35%/65% threshold (not 15%/85%) ensures the stop-loss fires while the sell price is still ~30–35¢, not after the market has fully repriced to 85%+ leaving only 10–13¢ to recover.
-
-One stop-loss is allowed per contract per session. After a stop-loss, the trade lock is cleared and the bot can immediately re-enter in the opposite direction — but only if the opposite trade passes all the same edge filters (commitment rate, GBM gap, price cap, Kelly sizing).
-
-Event log example:
-```
-🛑 STOP-LOSS YES  42 × 75.0¢ → 13.0¢  PnL -$26.04  balance $185.95
-📄 PAPER NO  28 contracts @ 35.0¢  cost $9.80  balance $185.95
-```
+Commitment rate and GBM-market gap are shown as **⚠ warnings** in the basis panel but no longer block the recommendation — they are informational context for the trader.
 
 ---
 
@@ -104,10 +85,10 @@ Set `TRADING_MODE` in `.env`:
 
 | Mode | Behaviour |
 |------|-----------|
-| `paper` | Simulated fills at the current ask. No real orders. P&L tracked in `logs/executor_bankroll.json`. |
+| `paper` | Simulated fills at current market price. P&L tracked in `logs/executor_bankroll.json`. |
 | `live` | Real market orders via Kalshi REST API. Balance fetched from Kalshi at startup and after each settlement. |
 
-In live mode the executor bankroll is always the real Kalshi available balance — Kelly sizing automatically reflects your actual account.
+**To reset the paper balance**, add `PAPER_BANKROLL_RESET=300.0` to `.env` and restart. The balance resets to that value. Remove the line (or set to `0`) on subsequent restarts to resume normal persistence.
 
 ---
 
@@ -155,12 +136,11 @@ main.py
   → KalshiFeed.run()                REST contract discovery + WebSocket orderbook
   → BtcFeed.run()                   Coinbase BTC-USD price (ticker) + CVD (trade stream)
   → Analyzer.run()
-      _analysis_loop()              GBM + 7-signal vote + edge filters (every 50 ms)
-      _bias_refresher()             RSI/BB + DVOL + OKX basis/funding (every 60 s)
+      _analysis_loop()              GBM fair value + recommendation (every 50 ms)
+      _bias_refresher()             RSI/BB + DVOL + OKX basis/funding (every 15 s)
       _window_resolver()            settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_stop_loss()             mid-window risk cut on GBM flip
-      maybe_trade()                 order placement on edge detection
+      maybe_trade()                 enter/reverse based on bias+GBM agreement
   → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
 ```
 
@@ -189,21 +169,21 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `KALSHI_PRIVATE_KEY_B64` | — | Base64-encoded PEM private key |
 | `BTC_SERIES_TICKER` | `KXBTC15M` | Series ticker for contract auto-discovery |
 | `TRADING_MODE` | `paper` | `paper` (simulated) or `live` (real orders) |
-| `BANKROLL` | `250.00` | Starting bankroll in dollars (paper mode fallback if API fetch fails) |
+| `BANKROLL` | `250.00` | Starting bankroll for model accuracy tracking |
+| `PAPER_BANKROLL_RESET` | `0.0` | Set to a positive value to reset paper balance on next startup, then remove |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
-| `MOMENTUM_ENTRY_USD` | `40.0` | Min BTC move from strike — 1.1× hysteresis applied to avoid threshold jitter |
-| `MIN_COMMITMENT_RATE` | `0.15` | Min `\|BTC move\| / tau` in $/s — filters undecided moves early in the window |
-| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Min gap between GBM fair value and Kalshi mid — ensures a real mispricing edge |
-| `MIN_ENTRY_PRICE_CENTS` | `8.0` | Hard lower bound on entry price — below this the market is near-certain |
+| `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
+| `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
+| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Warning threshold: GBM vs Kalshi mid gap (shown as ⚠, does not block) |
+| `MIN_ENTRY_PRICE_CENTS` | `8.0` | Hard lower bound on entry price — below this market is near-certain |
 | `MAX_ENTRY_PRICE_CENTS` | `65.0` | Hard upper bound — above this you risk more than you can win |
-| `MAX_ENTRY_WINDOW_S` | `900.0` | Entry window opens when ≤ this many seconds remain |
-| `MIN_ENTRY_WINDOW_S` | `240.0` | Entry window closes when < this many seconds remain |
+| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window opens when ≤ this many seconds remain |
+| `MIN_ENTRY_WINDOW_S` | `120.0` | Entry window closes when < this many seconds remain |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |
 | `MIN_OPEN_INTEREST` | `500` | Thin-market flag threshold (contracts) |
-| `MAX_LINE_CROSSINGS` | `2` | Max times Kalshi mid may cross 50¢ — displayed in Analysis Conditions |
-| `MIN_DIRECTION_CONSISTENCY` | `0.6` | Min fraction of Kalshi mid steps trending away from 50¢ — informational |
 | `BINANCE_SYMBOL` | `BTC-USD` | Coinbase product ID for candle fetch |
+| `BINANCE_KLINES_INTERVAL` | `60` | Candle granularity in seconds (Coinbase supports: 60, 300, 900, 3600) |
 | `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind host |
 | `DASHBOARD_PORT` | `8000` | Dashboard port |
 
@@ -213,18 +193,19 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 
 | File | Contents |
 |------|----------|
-| `logs/session_<ts>.csv` | Every analysis event this session (recommendation changes, errors, fills) |
-| `logs/predictions.csv` | Cross-session prediction outcomes with entry price, bet size, P&L |
+| `logs/session_<ts>.csv` | Every analysis event this session (recommendations, fills, errors) |
+| `logs/predictions.csv` | Cross-session prediction outcomes with resolution and model accuracy |
+| `logs/technicals_discovery.csv` | Technical bias at window discovery vs actual resolution — used to evaluate whether RSI/BB has genuine predictive value |
 | `logs/lifetime_stats.json` | Persisted prediction accuracy counters across all sessions |
-| `logs/bankroll.json` | Model accuracy bankroll (tracks hypothetical P&L from every prediction) |
-| `logs/executor_bankroll.json` | Real bot bankroll (tracks actual paper/live trade P&L only) |
+| `logs/bankroll.json` | Model accuracy bankroll (hypothetical P&L from every prediction) |
+| `logs/executor_bankroll.json` | Bot bankroll (actual paper/live trade P&L only) |
 
 ---
 
 ## Notes
 
-- **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract, where p is the price. At 40¢ entry, round-trip taker cost is ~1.7¢ per contract. The bot does not currently deduct fees from Kelly sizing — factor this into any profitability analysis.
-- **Settlement accuracy.** The bot queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
-- **GBM sigma source.** Uses Deribit DVOL (implied vol) when available — more stable than 10-minute realized vol from tick data. Falls back to rolling realized vol.
-- **External data.** DVOL from Deribit public API (no auth). Basis and funding from OKX public API (no auth). Both are geo-accessible from the US.
-- **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window; the bot only trades when edge filters pass.
+- **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract. At 40¢ entry, round-trip taker cost is ~1.7¢ per contract. Not deducted from sizing — factor into profitability analysis.
+- **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
+- **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
+- **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but the bot only trades when bias and GBM agree.
+- **Technicals edge.** The `technicals_discovery.csv` file is accumulating discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows. Resolution-time analysis (where RSI reflects the price move that already happened) is circular and should not be used to evaluate predictive accuracy.
