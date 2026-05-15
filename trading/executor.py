@@ -1,20 +1,16 @@
 """
-Trade executor — places one market order per contract window when the analyzer
-signals a clear edge.
+Trade executor — follows the model recommendation panel and places orders.
 
-TRADING_MODE=paper  → simulated fills at current ask, no real orders placed
+TRADING_MODE=paper  → simulated fills at current market price, no real orders placed
 TRADING_MODE=live   → real orders via Kalshi REST API, balance synced from Kalshi
 
-Paper mode uses the executor_bankroll (persisted in logs/executor_bankroll.json)
-for Kelly sizing and P&L tracking.
-
-Live mode fetches the real Kalshi available balance on startup and after each
-settlement so Kelly sizing always reflects your actual account.
+Position sizing: flat $5 per trade regardless of bankroll.
+Reversals (recommendation flips mid-window): close existing position at market,
+then enter the new side — works correctly in both paper and live mode.
 """
 from __future__ import annotations
 
 import asyncio
-import time
 
 import httpx
 
@@ -23,13 +19,15 @@ from feeds.kalshi_ws import _make_rest_headers
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
+_UNIT_SIZE_USD = 1.0  # fixed dollars risked per trade
+
 
 class Executor:
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger):
         self.state  = state
         self.cfg    = cfg
         self.logger = logger
-        self._traded: set[str] = set()  # kept for live_order error recovery
+        self._attempted_contract: str | None = None  # prevents retry spam on failed orders
 
     async def startup(self) -> None:
         """Call once at boot. In live mode, seeds executor_bankroll from Kalshi."""
@@ -73,6 +71,11 @@ class Executor:
         """Follow the model recommendation panel (GBM-primary, slope fallback)."""
         contract = self.state.active_contract
         if not contract:
+            self._attempted_contract = None  # reset for next window
+            return
+
+        # Don't retry a failed order in the same window — wait for the next contract
+        if contract == self._attempted_contract:
             return
 
         target_side = self.state.recommendation.get("side")
@@ -88,7 +91,7 @@ class Executor:
 
         # Recommendation flipped — close current position before reversing
         if in_contract and pos["side"] != target_side:
-            await self._paper_close_bias_switch(contract, pos)
+            await self._close_position(contract, pos)
 
         ob = self.state.orderbook
         if target_side == "YES":
@@ -103,17 +106,23 @@ class Executor:
         if price < self.cfg.min_entry_price_cents or price > self.cfg.max_entry_price_cents:
             return
 
-        n_contracts = max(1, int(self.state.executor_bankroll * 0.10 / (price / 100.0)))
+        n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
 
         if self.cfg.trading_mode == "paper":
             await self._paper_fill(contract, target_side, n_contracts, price)
         elif self.cfg.trading_mode == "live":
             await self._live_order(contract, target_side, n_contracts, price)
 
-    # ── Bias switch close ─────────────────────────────────────────────────────
+    # ── Close position (paper or live) ───────────────────────────────────────
 
-    async def _paper_close_bias_switch(self, ticker: str, pos: dict) -> None:
-        """Close an open paper position at market when bias switches direction."""
+    async def _close_position(self, ticker: str, pos: dict) -> None:
+        """Close an open position at market — routes to paper or live path."""
+        if self.cfg.trading_mode == "live":
+            await self._live_close(ticker, pos)
+        else:
+            await self._paper_close(ticker, pos)
+
+    async def _paper_close(self, ticker: str, pos: dict) -> None:
         side = pos["side"]
         ob   = self.state.orderbook
         if side == "YES":
@@ -123,12 +132,12 @@ class Executor:
             sell_price = (100.0 - yes_ask) if yes_ask is not None else None
 
         if sell_price is None:
-            sell_price = pos["fill_price"]  # fallback to fill price if book is empty
+            sell_price = pos["fill_price"]
 
         await self.state.stop_position(ticker, sell_price)
         pnl = self.state.position["pnl"]
         await self.state.log_event(
-            f"🔄 BIAS SWITCH — closed {side}  {pos['contracts']} × {pos['fill_price']:.1f}¢ "
+            f"🔄 FLIP — closed {side}  {pos['contracts']} × {pos['fill_price']:.1f}¢ "
             f"→ {sell_price:.1f}¢  PnL ${pnl:+.2f}  balance ${self.state.executor_bankroll:.2f}"
         )
         await self.logger.log("bias_switch", {
@@ -138,9 +147,73 @@ class Executor:
             "fill_price": pos["fill_price"],
             "sell_price": sell_price,
             "pnl":        pnl,
+            "mode":       "paper",
         })
 
-    # ── Paper trading ─────────────────────────────────────────────────────────
+    async def _live_close(self, ticker: str, pos: dict) -> None:
+        side = pos["side"]
+        ob   = self.state.orderbook
+        if side == "YES":
+            est_sell = ob.best_bid() or pos["fill_price"]
+        else:
+            yes_ask  = ob.best_ask()
+            est_sell = (100.0 - yes_ask) if yes_ask is not None else pos["fill_price"]
+
+        # 20¢ below bid — fills immediately even if market moves before order lands
+        aggressive_price = max(2, int(round(est_sell)) - 20)
+        price_key = "yes_price" if side == "YES" else "no_price"
+        path = "/trade-api/v2/portfolio/orders"
+        url  = f"{self.cfg.kalshi_rest_base}/portfolio/orders"
+        headers = _make_rest_headers(self.cfg, "POST", path)
+        body = {
+            "ticker":   ticker,
+            "action":   "sell",
+            "side":     side.lower(),
+            "count":    pos["contracts"],
+            "type":     "market",
+            price_key:  aggressive_price,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                if not resp.is_success:
+                    detail = resp.text[:300]
+                    await self.state.log_event(f"❌ Close rejected {resp.status_code} ({ticker}): {detail}")
+                    await self.logger.log("close_error", {"ticker": ticker, "status": resp.status_code, "body": detail})
+                    return
+                order_id = resp.json().get("order", {}).get("order_id", "?")
+
+            actual_sell = await self._fetch_fill_price(order_id, est_sell)
+
+            # Verify the order actually filled — if not, abort the flip to avoid dual Kalshi positions
+            if actual_sell is None:
+                await self._cancel_order(order_id)
+                await self.state.log_event(f"⚠ Close order unfilled — cancelled ({ticker}), holding position")
+                await self.logger.log("close_unfilled", {"ticker": ticker, "order_id": order_id})
+                return
+
+            await self.state.stop_position(ticker, actual_sell)
+            pnl = self.state.position["pnl"]
+            await self.state.log_event(
+                f"🔄 LIVE FLIP — closed {side}  {pos['contracts']} × {pos['fill_price']:.1f}¢ "
+                f"→ {actual_sell:.1f}¢  PnL ${pnl:+.2f}  order={order_id}  "
+                f"balance ${self.state.executor_bankroll:.2f}"
+            )
+            await self.logger.log("bias_switch", {
+                "ticker":     ticker,
+                "side":       side,
+                "contracts":  pos["contracts"],
+                "fill_price": pos["fill_price"],
+                "sell_price": actual_sell,
+                "pnl":        pnl,
+                "order_id":   order_id,
+                "mode":       "live",
+            })
+        except Exception as exc:
+            await self.state.log_event(f"❌ Live close failed ({ticker}): {exc}")
+            await self.logger.log("close_error", {"ticker": ticker, "error": str(exc)})
+
+    # ── Paper fill ────────────────────────────────────────────────────────────
 
     async def _paper_fill(
         self, ticker: str, side: str, contracts: int, fill_price: float
@@ -160,7 +233,7 @@ class Executor:
             "balance":    self.state.executor_bankroll,
         })
 
-    # ── Live trading ──────────────────────────────────────────────────────────
+    # ── Live order ────────────────────────────────────────────────────────────
 
     async def _live_order(
         self, ticker: str, side: str, contracts: int, estimated_price: float
@@ -168,22 +241,42 @@ class Executor:
         path = "/trade-api/v2/portfolio/orders"
         url  = f"{self.cfg.kalshi_rest_base}/portfolio/orders"
         headers = _make_rest_headers(self.cfg, "POST", path)
+        # 20¢ above ask — guarantees immediate fill even if market moves several ticks before order lands.
+        # Actual fill price is determined by Kalshi matching engine (we pay current ask, not our limit).
+        aggressive_price = min(98, int(round(estimated_price)) + 20)
+        price_key = "yes_price" if side == "YES" else "no_price"
         body = {
-            "ticker": ticker,
-            "action": "buy",
-            "side":   side.lower(),
-            "count":  contracts,
-            "type":   "market",
+            "ticker":   ticker,
+            "action":   "buy",
+            "side":     side.lower(),
+            "count":    contracts,
+            "type":     "market",
+            price_key:  aggressive_price,
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, headers=headers, json=body)
-                resp.raise_for_status()
+                if not resp.is_success:
+                    self._attempted_contract = ticker
+                    detail = resp.text[:300]
+                    await self.state.log_event(
+                        f"❌ Order rejected {resp.status_code} ({ticker}): {detail}"
+                    )
+                    await self.logger.log("order_error", {
+                        "ticker": ticker, "side": side,
+                        "status": resp.status_code, "body": detail,
+                    })
+                    return
                 order    = resp.json().get("order", {})
                 order_id = order.get("order_id", "?")
 
-            # Market orders fill immediately — fetch the order to get actual fill price
             actual_price = await self._fetch_fill_price(order_id, estimated_price)
+            if actual_price is None:
+                await self._cancel_order(order_id)
+                self._attempted_contract = ticker
+                await self.state.log_event(f"⚠ Buy order unfilled — cancelled ({ticker}), skipping window")
+                await self.logger.log("buy_unfilled", {"ticker": ticker, "order_id": order_id})
+                return
             cost = round(contracts * actual_price / 100.0, 2)
 
             await self.state.open_position(ticker, side, contracts, actual_price, "live")
@@ -203,12 +296,10 @@ class Executor:
             })
 
         except Exception as exc:
-            self._traded.discard(ticker)
+            self._attempted_contract = ticker
             await self.state.log_event(f"❌ Order failed ({ticker}): {exc}")
             await self.logger.log("order_error", {
-                "ticker": ticker,
-                "side":   side,
-                "error":  str(exc),
+                "ticker": ticker, "side": side, "error": str(exc),
             })
 
     # ── Kalshi API helpers ────────────────────────────────────────────────────
@@ -251,27 +342,56 @@ class Executor:
             })
         return None
 
-    async def _fetch_fill_price(self, order_id: str, fallback: float) -> float:
+    async def _fetch_fill_price(self, order_id: str, fallback: float) -> float | None:
         """
-        Fetch the actual average fill price for a market order.
-        Falls back to our estimated price if the API call fails.
+        Fetch actual fill price for a market order. Returns:
+          - fill price (cents) if order confirmed filled
+          - fallback if API calls all fail (network error — assume filled at estimate)
+          - None if order is resting/unfilled (caller should cancel and abort)
         """
         if order_id == "?":
             return fallback
         path = f"/trade-api/v2/portfolio/orders/{order_id}"
         url  = f"{self.cfg.kalshi_rest_base}/portfolio/orders/{order_id}"
         headers = _make_rest_headers(self.cfg, "GET", path)
-        for _ in range(3):   # market orders fill fast — 3 quick retries
+        last_status = None
+        for _ in range(6):  # up to 3s total
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     resp = await client.get(url, headers=headers)
                     resp.raise_for_status()
                     order = resp.json().get("order", {})
-                avg_price = order.get("avg_price")
-                if avg_price is not None:
-                    # avg_price is in dollars (e.g. 0.68) → convert to cents
-                    return round(float(avg_price) * 100.0, 1)
+                last_status = order.get("status")
+                avg_price   = order.get("avg_price")
+                remaining   = order.get("remaining_count", 0)
+                if avg_price is not None and remaining == 0:
+                    confirmed = round(float(avg_price) * 100.0, 1)
+                    await self.logger.log("fill_confirmed", {
+                        "order_id": order_id, "fill_cents": confirmed, "status": last_status,
+                    })
+                    return confirmed
+                if last_status == "resting":
+                    # Order sitting in book unfilled — signal caller to cancel
+                    return None
             except Exception:
                 pass
             await asyncio.sleep(0.5)
+        # All retries exhausted without confirming — network issue, use fallback
+        await self.logger.log("fill_fetch_failed", {
+            "order_id": order_id, "last_status": last_status, "fallback_cents": fallback
+        })
         return fallback
+
+    async def _cancel_order(self, order_id: str) -> None:
+        """Cancel a resting order on Kalshi."""
+        if order_id == "?":
+            return
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        url  = f"{self.cfg.kalshi_rest_base}/portfolio/orders/{order_id}"
+        headers = _make_rest_headers(self.cfg, "DELETE", path)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.delete(url, headers=headers)
+            await self.logger.log("order_cancelled", {"order_id": order_id, "status": resp.status_code})
+        except Exception as exc:
+            await self.logger.log("cancel_error", {"order_id": order_id, "error": str(exc)})

@@ -19,24 +19,25 @@ Kalshi settles using CF Benchmarks' BRTI (averaged over the 60 seconds before cl
 
 ## How the bot decides to trade
 
-The bot has two independent decision-makers that run simultaneously:
+The executor and recommendation panel run the same strategy. The executor trades whatever the recommendation panel shows.
 
-### Executor (places actual trades)
+### Decision hierarchy (both executor and recommendation panel)
 
-1. **Technical bias** (RSI/BB from the last 20 Coinbase 1-min candles, locked at window open) must have a directional view — `up` or `down`. ADX < 15 forces neutral → no trade.
-2. **GBM fair value** must broadly agree — GBM > 55% for YES, GBM < 45% for NO.
+First signal that fires wins:
 
-When both agree, the bot enters at market price using **10% of the executor bankroll**. When the bias switches direction mid-window, the current position is closed and a new one is opened in the opposite direction.
+1. **GBM fair value** — if GBM < 35% → NO; if GBM > 65% → YES
+2. **BTC slope** — if GBM is neutral and slope > 0.30 $/s → slope drives
+3. **No signal** → WAIT / no trade
 
-### Recommendation panel (dashboard display)
+Technical bias (RSI/BB) is **informational only** — shown in the dashboard basis and counted in the signal score, but cannot block a GBM or slope call.
 
-Decision hierarchy — first signal that fires wins:
+### Trade lifecycle
 
-1. **GBM fair value** — if GBM < 35% → recommend NO; if GBM > 65% → recommend YES
-2. **BTC slope** — if GBM is neutral and slope is strong enough (> 0.30 $/s), slope drives the recommendation
-3. **No signal** → WAIT
-
-Technical bias is **informational only** in the recommendation panel — it is shown in the basis and counted in the signal score, but cannot block a GBM or slope recommendation. This is intentional: the 81% RSI/BB accuracy was measured from a small in-sample dataset and is likely overfit; GBM (82% over 99 windows) is more validated.
+- **Entry**: fires within one analysis tick (50ms) of the recommendation appearing. Orders submit at ask+10¢ (buys) or bid−10¢ (sells) so they cross the spread immediately regardless of fast-moving bots.
+- **Hold**: position sits untouched as long as the recommendation stays on the same side or goes to WAIT
+- **Reversal**: only happens if the recommendation flips to the opposite side and holds there for **60 seconds** (flip lock). Early break only if GBM swings 30+ points against the position (e.g. locked YES and GBM drops below 35%).
+- **Settlement**: at window close the position is marked won/lost regardless of current recommendation
+- **Unfilled order guard**: if a buy or sell order is confirmed resting (not filled) after 3 seconds, it is cancelled on Kalshi and the position state rolls back — prevents holding two real positions with one in local state
 
 ---
 
@@ -55,19 +56,23 @@ Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The marke
 
 ## Technical bias (RSI/BB)
 
-Fetched every **15 seconds between windows** (locked during active windows) from Coinbase Exchange 1-minute candles — last 20 candles (~20 minutes of data). Three indicators computed:
+Fetched every **15 seconds between windows** (locked during active windows) from Coinbase Exchange 1-minute candles — last 35 candles (~35 minutes of data). Three indicators computed:
 
-| Indicator | Bullish condition | Bearish condition |
-|-----------|------------------|------------------|
-| RSI(14) | < 40 (oversold → expect bounce up) | > 60 (overbought → expect reversal down) |
-| Bollinger Band position | < 0.4 (near lower band → oversold) | > 0.6 (near upper band → overbought) |
+| Indicator | Bullish (`up`) | Bearish (`down`) |
+|-----------|---------------|-----------------|
+| RSI(14) | > 60 (strong uptrend → continuation UP) | < 40 (strong downtrend → continuation DOWN) |
+| Bollinger Band position | > 0.6 (near upper band → uptrend) | < 0.4 (near lower band → downtrend) |
 | ADX(14) | must be ≥ 15 for any signal to count | < 15 → all signals suppressed |
 
-This uses **mean-reversion** logic — oversold conditions predict a bounce UP in the next 15 minutes. Confirmed on historical data; the opposite (momentum-following) interpretation tested at 19% accuracy.
+This uses **momentum-following** logic — live data (122 windows) showed:
+- `bias=down` (RSI < 40): 80% accurate → BTC in a downtrend keeps going down
+- `bias=up` (RSI > 60): 58% accurate → BTC in an uptrend keeps going up
 
-**ADX < 15 means no trend** — RSI and BB signals are unreliable in flat/choppy markets so bias is forced to neutral.
+Mean-reversion interpretation (oversold = expect bounce) was tested and rejected — the "up" signal was 20% accurate, effectively backwards.
 
-The bias is locked at window discovery and does not update mid-window. This prevents intra-window BTC crashes from flipping the bias on a bounce signal rather than a genuine directional change.
+**ADX < 15 means no trend** — RSI and BB signals are unreliable in flat markets so bias is forced to neutral.
+
+The bias is locked at window discovery and does not update mid-window. This prevents intra-window BTC moves from flipping the pre-window reading.
 
 ---
 
@@ -77,7 +82,7 @@ The bias is locked at window discovery and does not update mid-window. This prev
 |--------|--------|------|
 | **GBM fair value** | Live BTC + DVOL | Primary — drives recommendation when < 35% or > 65% |
 | **BTC slope** | Coinbase spot price history | Fallback — drives when GBM neutral and slope > 0.30 $/s |
-| **Technical bias** | Coinbase 1-min candles (20-candle lookback) | Informational — shown in basis, cannot block GBM/slope |
+| **Technical bias** | Coinbase 1-min candles (35-candle lookback) | Informational — shown in basis, cannot block GBM/slope |
 | BTC momentum | Coinbase spot | Informational |
 | CVD (order flow) | Coinbase trade stream | Informational |
 | Funding rate | OKX perp | Informational |
@@ -151,7 +156,7 @@ main.py
       _bias_refresher()             RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
       _window_resolver()            settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_trade()                 enter/reverse based on pre-window bias + GBM agreement
+      maybe_trade()                 enter/reverse based on model recommendation panel
   → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
 ```
 
@@ -222,4 +227,4 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but the bot only trades when bias and GBM agree.
 - **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows. The 20-candle lookback (~20 minutes) reflects the immediate pre-window momentum — the prior 100-candle (~90 minute) lookback was too slow to capture recent directional shifts.
-- **Two strategies.** The executor and recommendation panel use different primary signals and thresholds on purpose. The executor's pre-window bias + GBM confirmation has been empirically profitable. The recommendation panel's GBM-primary approach is more conservative (requires GBM < 35% or > 65%). Do not merge them until side-by-side accuracy data (50+ windows) justifies it.
+- **Unified strategy.** The executor now follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 65% → YES) with slope as a fallback. RSI/BB is informational context only. GBM accuracy validated at 78.6% over 28 directional calls across 122 windows.

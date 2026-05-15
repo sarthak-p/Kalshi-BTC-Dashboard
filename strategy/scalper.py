@@ -175,10 +175,10 @@ def _compute_recommendation(
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
     # GBM fair-value
-    if fv > 55:
+    if fv > 65:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 45:
+    elif fv < 35:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
