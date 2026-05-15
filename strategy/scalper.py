@@ -564,7 +564,7 @@ class Analyzer:
             bias = await fetch_bias(
                 symbol=self.cfg.binance_symbol,
                 interval=self.cfg.binance_klines_interval,
-                limit=20,
+                limit=35,
                 min_adx=self.cfg.min_adx_threshold,
             )
             if bias is not None:

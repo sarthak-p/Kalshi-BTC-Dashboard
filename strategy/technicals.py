@@ -150,11 +150,11 @@ async def _fetch_okx_sentiment() -> Optional[tuple[float, float]]:
 def _classify(rsi: float, bb_pos: float, adx: float = 25.0, min_adx: float = 15.0) -> str:
     if adx < min_adx:
         return "neutral"   # ranging market — RSI/BB signals not reliable below this ADX
-    # Mean-reversion interpretation (confirmed by 117-window backtest):
-    # oversold (low RSI, near lower BB) → price likely bounces UP in next 15 min
-    # overbought (high RSI, near upper BB) → price likely reverts DOWN
-    bull = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
-    bear = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
+    # Momentum-following (live data: oversold = continuation DOWN 80%, overbought = continuation UP 58%)
+    # RSI < 40 + near lower BB → strong downtrend → expect continuation DOWN
+    # RSI > 60 + near upper BB → strong uptrend → expect continuation UP
+    bull = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
+    bear = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
     if bull >= 1 and bull > bear:
         return "up"
     if bear >= 1 and bear > bull:

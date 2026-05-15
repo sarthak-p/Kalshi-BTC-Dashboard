@@ -70,23 +70,14 @@ class Executor:
             self.state._dirty.set()
 
     async def maybe_trade(self) -> None:
-        """Bias follower: enter or reverse based on technical bias. No gates, no signal voting."""
+        """Follow the model recommendation panel (GBM-primary, slope fallback)."""
         contract = self.state.active_contract
         if not contract:
             return
 
-        bias = self.state.pre_window_bias
-        if bias == "neutral":
+        target_side = self.state.recommendation.get("side")
+        if not target_side:
             return
-
-        target_side = "YES" if bias == "up" else "NO"
-
-        # Only trade when GBM agrees with the technical bias
-        fv = self.state.prediction_yes_pct
-        if target_side == "YES" and fv <= 55:
-            return  # GBM not leaning YES — skip
-        if target_side == "NO" and fv >= 45:
-            return  # GBM not leaning NO — skip
 
         pos = self.state.position
         in_contract = pos["status"] == "open" and pos["ticker"] == contract
@@ -95,11 +86,10 @@ class Executor:
         if in_contract and pos["side"] == target_side:
             return
 
-        # Bias switched — close current position at market before reversing
+        # Recommendation flipped — close current position before reversing
         if in_contract and pos["side"] != target_side:
             await self._paper_close_bias_switch(contract, pos)
 
-        # Enter at current market price, no filtering
         ob = self.state.orderbook
         if target_side == "YES":
             price = ob.best_ask()
@@ -110,7 +100,6 @@ class Executor:
         if not price:
             return
 
-        # Don't trade outside the risk/reward range — same gate as recommendation panel
         if price < self.cfg.min_entry_price_cents or price > self.cfg.max_entry_price_cents:
             return
 
