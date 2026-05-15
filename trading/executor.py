@@ -110,16 +110,18 @@ class Executor:
         if not price:
             return
 
+        # Don't trade outside the risk/reward range — same gate as recommendation panel
+        if price < self.cfg.min_entry_price_cents or price > self.cfg.max_entry_price_cents:
+            return
+
         n_contracts = max(1, int(self.state.executor_bankroll * 0.10 / (price / 100.0)))
 
         if self.cfg.trading_mode == "paper":
             await self._paper_fill(contract, target_side, n_contracts, price)
+        elif self.cfg.trading_mode == "live":
+            await self._live_order(contract, target_side, n_contracts, price)
 
     # ── Bias switch close ─────────────────────────────────────────────────────
-
-    async def maybe_stop_loss(self) -> None:
-        """Not used in bias-follower mode — reversals are handled in maybe_trade."""
-        pass
 
     async def _paper_close_bias_switch(self, ticker: str, pos: dict) -> None:
         """Close an open paper position at market when bias switches direction."""
@@ -148,68 +150,6 @@ class Executor:
             "sell_price": sell_price,
             "pnl":        pnl,
         })
-
-    async def _paper_stop_loss(
-        self, ticker: str, side: str, contracts: int, fill_price: float, sell_price: float
-    ) -> None:
-        await self.state.stop_position(ticker, sell_price)
-        pnl = self.state.position["pnl"]
-        await self.state.log_event(
-            f"🛑 STOP-LOSS {side}  {contracts} × {fill_price:.1f}¢ → {sell_price:.1f}¢  "
-            f"PnL ${pnl:+.2f}  balance ${self.state.executor_bankroll:.2f}"
-        )
-        await self.logger.log("stop_loss", {
-            "ticker":     ticker,
-            "side":       side,
-            "contracts":  contracts,
-            "fill_price": fill_price,
-            "sell_price": sell_price,
-            "pnl":        pnl,
-            "mode":       "paper",
-        })
-
-    async def _live_stop_loss(
-        self, ticker: str, side: str, contracts: int, fill_price: float, sell_price_est: float
-    ) -> None:
-        path = "/trade-api/v2/portfolio/orders"
-        url  = f"{self.cfg.kalshi_rest_base}/portfolio/orders"
-        headers = _make_rest_headers(self.cfg, "POST", path)
-        body = {
-            "ticker": ticker,
-            "action": "sell",
-            "side":   side.lower(),
-            "count":  contracts,
-            "type":   "market",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, headers=headers, json=body)
-                resp.raise_for_status()
-                order_id = resp.json().get("order", {}).get("order_id", "?")
-
-            actual_sell = await self._fetch_fill_price(order_id, sell_price_est)
-            await self.state.stop_position(ticker, actual_sell)
-            pnl = self.state.position["pnl"]
-            await self.state.log_event(
-                f"🛑 LIVE STOP-LOSS {side}  {contracts} × {fill_price:.1f}¢ → {actual_sell:.1f}¢  "
-                f"PnL ${pnl:+.2f}  order={order_id}  balance ${self.state.executor_bankroll:.2f}"
-            )
-            await self.logger.log("stop_loss", {
-                "ticker":     ticker,
-                "side":       side,
-                "contracts":  contracts,
-                "fill_price": fill_price,
-                "sell_price": actual_sell,
-                "pnl":        pnl,
-                "order_id":   order_id,
-                "mode":       "live",
-            })
-        except Exception as exc:
-            # Roll back so the position stays open and stop-loss can retry
-            self._stop_lossed.discard(contract := ticker)
-            self._traded.add(contract)
-            await self.state.log_event(f"❌ Stop-loss failed ({ticker}): {exc}")
-            await self.logger.log("stop_loss_error", {"ticker": ticker, "error": str(exc)})
 
     # ── Paper trading ─────────────────────────────────────────────────────────
 

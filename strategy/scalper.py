@@ -150,58 +150,6 @@ def _cvd_signal(cvd_window: float, cvd_total: float, btc_change: float = 0.0) ->
 
     return None
 
-def _kelly_position_size(
-        bankroll: float,
-        entry_price_cents: float,
-        win_probability: float,
-        fraction: float = 0.5,      # half-Kelly — conservative
-        max_bet_pct: float = 0.15,  # never risk more than 15% per round
-        min_bet: float = 5.0,       # minimum meaningful bet
-    ) -> dict:
-        """
-        Returns recommended bet size given bankroll and current edge.
-        
-        entry_price_cents: what you pay (e.g. 68 for YES at 68¢)
-        win_probability:   your model's historical accuracy (e.g. 0.91)
-        fraction:          Kelly fraction — 0.5 = half Kelly
-        """
-        if entry_price_cents <= 0 or entry_price_cents >= 100:
-            return {"bet": 0.0, "contracts": 0, "reason": "price out of range"}
-        
-        # Net odds: profit per dollar risked if correct
-        profit_per_dollar = (100.0 - entry_price_cents) / entry_price_cents
-        
-        # Kelly fraction of bankroll
-        kelly_pct = (
-            (win_probability * profit_per_dollar - (1 - win_probability))
-            / profit_per_dollar
-        )
-        
-        if kelly_pct <= 0:
-            return {"bet": 0.0, "contracts": 0, "reason": "no edge at this price"}
-        
-        # Apply fraction and cap
-        bet_pct   = min(kelly_pct * fraction, max_bet_pct)
-        raw_bet   = bankroll * bet_pct
-        
-        # Round down to whole contracts (each contract costs entry_price_cents / 100 dollars)
-        cost_per_contract = entry_price_cents / 100.0
-        contracts = int(raw_bet / cost_per_contract)
-        actual_bet = round(contracts * cost_per_contract, 2)
-        
-        if actual_bet < min_bet:
-            return {"bet": 0.0, "contracts": 0, "reason": f"bet ${actual_bet:.2f} below minimum"}
-        
-        return {
-            "bet":          actual_bet,
-            "contracts":    contracts,
-            "cost_per":     round(cost_per_contract, 2),
-            "payout":       round(contracts * 1.0, 2),   # $1 per contract at resolution
-            "profit_if_win": round(contracts - actual_bet, 2),
-            "kelly_raw":    round(kelly_pct, 3),
-            "bet_pct":      round(bet_pct, 3),
-            "reason":       "ok",
-        }
 
 def _compute_recommendation(
     fv: float,
@@ -209,11 +157,9 @@ def _compute_recommendation(
     bias: str,
     ob: Orderbook,
     momentum_usd: float,
+    drift_usd_per_s: float = 0.0,
     cvd_window: float = 0.0,
     cvd_total: float = 0.0,
-    adx: float = 25.0,
-    bankroll: float = 250.0,
-    session_accuracy: float = 0.91,
     funding_pct: float = 0.0,
     kalshi_mid_history: list = None,
     tau_seconds: float = 0.0,
@@ -221,11 +167,14 @@ def _compute_recommendation(
     min_gbm_market_gap_cents: float = 8.0,
     min_entry_price_cents: float = 8.0,
     max_entry_price_cents: float = 65.0,
+    min_slope_usd_per_s: float = 0.30,
 ) -> dict:
     basis = []
     edge_gate_blocked = False
 
-    # ── Primary signals: GBM + technicals ────────────────────────────────────
+    # ── Primary signals: GBM, slope, technicals ───────────────────────────────
+
+    # GBM fair-value
     if fv > 55:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
@@ -236,26 +185,57 @@ def _compute_recommendation(
         model_side = None
         basis.append(f"GBM: {fv:.0f}% (neutral)")
 
-    if bias == "up":
+    # BTC slope — pre-window momentum, best early-window signal
+    if drift_usd_per_s >= min_slope_usd_per_s:
+        slope_side = "YES"
+        basis.append(f"Slope: +${drift_usd_per_s:.2f}/s (uptrend)")
+    elif drift_usd_per_s <= -min_slope_usd_per_s:
+        slope_side = "NO"
+        basis.append(f"Slope: ${drift_usd_per_s:.2f}/s (downtrend)")
+    else:
+        slope_side = None
+        basis.append(f"Slope: ${drift_usd_per_s:+.2f}/s (flat)")
+
+    # Technicals (RSI/BB/ADX)
+    # Technicals are only meaningful when GBM is uncertain (20–80%).
+    # Outside that range BTC is already far from the strike — GBM encodes
+    # that gap directly, and a general RSI/BB bounce signal is irrelevant.
+    if 20.0 < fv < 80.0 and bias == "up":
         bias_side = "YES"
         basis.append("Technicals: bullish (RSI/BB)")
-    elif bias == "down":
+    elif 20.0 < fv < 80.0 and bias == "down":
         bias_side = "NO"
         basis.append("Technicals: bearish (RSI/BB)")
+    elif bias in ("up", "down"):
+        bias_side = None
+        basis.append(f"Technicals: {bias} — ignored (GBM {fv:.0f}% already decisive)")
     else:
         bias_side = None
 
-    # Primary rule: both GBM and technicals must agree
-    if model_side is not None and bias_side == model_side:
+    # Decision hierarchy:
+    #   1. GBM has a signal → GBM drives; technicals are informational only
+    #   2. GBM neutral, slope has a signal → slope drives; technicals are informational only
+    #   3. Both neutral → no recommendation
+    # Technicals never veto — they had veto power before, but the 81% accuracy
+    # was derived from a small in-sample reversal and likely overfit.
+    if model_side is not None:
         side = model_side
+        if bias_side is not None and bias_side != model_side:
+            basis.append(f"Technicals: {bias} (conflicts with GBM — informational)")
+        elif bias_side is None:
+            basis.append("Technicals: neutral (GBM driving)")
+    elif slope_side is not None:
+        side = slope_side
+        if bias_side is not None and bias_side != slope_side:
+            basis.append(f"Technicals: {bias} (conflicts with slope — informational)")
+        elif bias_side is None:
+            basis.append("Technicals: neutral (slope driving)")
+        else:
+            basis.append(f"Technicals: {bias} confirms slope")
     else:
         side = None
-        if model_side is not None and bias_side is not None and model_side != bias_side:
-            basis.append(f"Technicals: {bias} — conflicts with GBM")
-        elif model_side is None and bias_side is not None:
-            basis.append(f"Technicals: {bias} — GBM neutral, waiting for price to commit")
-        elif model_side is not None and bias_side is None:
-            basis.append("Technicals: neutral — waiting for RSI/BB signal")
+        if bias_side is not None:
+            basis.append(f"Technicals: {bias} — GBM+slope neutral")
         else:
             basis.append("Technicals: neutral")
 
@@ -326,7 +306,7 @@ def _compute_recommendation(
                 basis.append(f"Kalshi mid: flat ({slope:+.3f}¢/s)")
 
     # Count supporting signals that agree with the recommended side (informational)
-    supporting = [btc_side, cvd_side, funding_side, imbalance_side, kalshi_momentum_side]
+    supporting = [btc_side, cvd_side, funding_side, imbalance_side, kalshi_momentum_side, slope_side]
     if side is not None:
         agree_count = sum(1 for s in supporting if s == side)
         disagree_count = sum(1 for s in supporting if s is not None and s != side)
@@ -355,29 +335,15 @@ def _compute_recommendation(
                     f"(gap {gap_val:+.1f}¢)"
                 )
 
-    # ── Hard gate: entry price range (risk/reward) ────────────────────────────
+    # ── Hard gate: only block near-zero entries (model has no useful edge) ──────
     if side is not None and entry_price is not None:
         if entry_price < min_entry_price_cents:
             basis.append(
-                f"⛔ Entry {entry_price:.1f}¢ too cheap — market near-certain"
+                f"⛔ Entry {entry_price:.1f}¢ below floor {min_entry_price_cents:.0f}¢ — poor risk/reward"
             )
             side = None
             entry_price = None
             edge_gate_blocked = True
-        elif entry_price > max_entry_price_cents:
-            basis.append(
-                f"⛔ Entry {entry_price:.1f}¢ too expensive "
-                f"(risk {entry_price:.0f}¢ to win {100 - entry_price:.0f}¢)"
-            )
-            side = None
-            entry_price = None
-            edge_gate_blocked = True
-
-    sizing = _kelly_position_size(
-        bankroll=bankroll,
-        entry_price_cents=entry_price or 0.0,
-        win_probability=session_accuracy,
-    )
 
     return {
         "side": side,
@@ -385,7 +351,6 @@ def _compute_recommendation(
         "confidence": round((2 + agree_count) / 7.0, 2) if side else 0.0,
         "signal_count": agree_count,
         "basis": basis,
-        "sizing": sizing,
         "edge_gate_blocked": edge_gate_blocked,
     }
 
@@ -509,11 +474,9 @@ class Analyzer:
             bias=self.state.pre_window_bias,
             ob=ob,
             momentum_usd=self.cfg.momentum_entry_usd,
+            drift_usd_per_s=slope,
             cvd_window=self.state.cvd_window,
             cvd_total=self.state.cvd_total,
-            adx=self.state.tech_adx,
-            bankroll=self.state.executor_bankroll,
-            session_accuracy=self.state._pred_accuracy(lifetime=False) or 0.91,
             funding_pct=self.state.funding_rate_pct,
             kalshi_mid_history=list(self.state.kalshi_mid_history),
             tau_seconds=tau_seconds,
@@ -521,6 +484,7 @@ class Analyzer:
             min_gbm_market_gap_cents=self.cfg.min_gbm_market_gap_cents,
             min_entry_price_cents=self.cfg.min_entry_price_cents,
             max_entry_price_cents=self.cfg.max_entry_price_cents,
+            min_slope_usd_per_s=self.cfg.btc_slope_signal_threshold,
         )
 
         if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
@@ -564,10 +528,11 @@ class Analyzer:
                         f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
                     )
         elif current_side is None and locked is not None:
-            if now_ts - lock_ts < 60.0 and not gbm_strongly_opposes:
+            edge_blocked = self.state.recommendation.get("edge_gate_blocked", False)
+            if now_ts - lock_ts < 60.0 and not gbm_strongly_opposes and not edge_blocked:
                 self.state.recommendation["side"] = locked
                 self.state.recommendation["basis"].append(
-                    f"⚠ Null suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
+                    f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
                 )
 
         if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
@@ -580,7 +545,6 @@ class Analyzer:
             })
 
         if self.executor:
-            await self.executor.maybe_stop_loss()
             await self.executor.maybe_trade()
 
         self.state._dirty.set()
@@ -594,22 +558,26 @@ class Analyzer:
 
     async def _refresh_bias(self) -> None:
         from strategy.technicals import fetch_bias, fetch_market_sentiment
-        bias = await fetch_bias(
-            symbol=self.cfg.binance_symbol,
-            interval=self.cfg.binance_klines_interval,
-            limit=100,
-        )
-        if bias is not None:
-            await self.state.update_technicals(
-                bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
+        # Only update RSI/BB/ADX bias between windows — mid-window crashes or bounces
+        # would otherwise silently flip pre_window_bias and change the executor's decision.
+        if not self.state.active_contract:
+            bias = await fetch_bias(
+                symbol=self.cfg.binance_symbol,
+                interval=self.cfg.binance_klines_interval,
+                limit=20,
+                min_adx=self.cfg.min_adx_threshold,
             )
-            await self.logger.log("technicals", {
-                "rsi": bias.rsi,
-                "adx": bias.adx,
-                "bb_pos": bias.bb_position,
-                "bb_width": bias.bb_width,
-                "bias": bias.bias,
-            })
+            if bias is not None:
+                await self.state.update_technicals(
+                    bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
+                )
+                await self.logger.log("technicals", {
+                    "rsi": bias.rsi,
+                    "adx": bias.adx,
+                    "bb_pos": bias.bb_position,
+                    "bb_width": bias.bb_width,
+                    "bias": bias.bias,
+                })
 
         sentiment = await fetch_market_sentiment()
         if sentiment is not None:
@@ -756,47 +724,11 @@ class Analyzer:
                     resolution,
                 ])
 
-        # ── Sizing + bankroll update ──────────────────────────────────────────────
-        entry_price_used = self.state.recommendation.get("entry_price") or 68.0
-        accuracy = self.state._pred_accuracy(lifetime=False) or 0.91
-
-        sizing = _kelly_position_size(
-            bankroll=self.state.bankroll,
-            entry_price_cents=entry_price_used,
-            win_probability=accuracy,
-        )
-
-        if prediction_correct is True and sizing["bet"] > 0:
-            self.state.last_pnl = round(sizing["profit_if_win"], 2)
-            self.state.bankroll = round(self.state.bankroll + sizing["profit_if_win"], 2)
-        elif prediction_correct is False and sizing["bet"] > 0:
-            self.state.last_pnl = round(-sizing["bet"], 2)
-            self.state.bankroll = round(self.state.bankroll - sizing["bet"], 2)
-        else:
-            self.state.last_pnl = 0.0   # abstained — NEUTRAL prediction or no signal
-
-        self.state.last_bet    = sizing["bet"]
-        self.state.session_pnl = round(self.state.session_pnl + self.state.last_pnl, 2)
-        self.state._save_bankroll()
-
-        trade_status = (
-            "WIN"  if prediction_correct is True  else
-            "LOSS" if prediction_correct is False else
-            "SKIP"
-        )
-        await self.state.log_event(
-            f"💰 {trade_status}"
-            f"  PnL: ${self.state.last_pnl:+.2f}"
-            f"  Bet: ${sizing['bet']:.2f} × {sizing['contracts']} contracts"
-            f"  Bankroll: ${self.state.bankroll:.2f}"
-        )
-
         # ── CSV log ───────────────────────────────────────────────────────────────
         self.logger.log_prediction({
             "session_ts":              int(self.state.session_start_ts),
             "date_utc":                datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
             "ticker":                  ticker,
-            "floor_strike":            round(btc_open, 2) if btc_open > 0 else "",
             "btc_open":                round(btc_open, 2) if btc_open > 0 else "",
             "btc_close":               round(btc_at_close, 2),
             "btc_change":              round(btc_chg, 2),
@@ -809,11 +741,6 @@ class Analyzer:
             "predicted_resolution":    predicted_resolution,
             "resolution_pred_correct": resolution_pred_correct,
             "adx":                     round(tech_adx, 1),
-            "entry_price":             entry_price_used,
-            "bet":                     round(sizing["bet"], 2),
-            "contracts":               sizing["contracts"],
-            "pnl":                     self.state.last_pnl,
-            "bankroll":                self.state.bankroll,
         })
 
         # ── Accuracy tracking ─────────────────────────────────────────────────────

@@ -10,8 +10,7 @@ from typing import Optional
 
 from fastapi import WebSocket
 
-_STATS_FILE            = Path("logs/lifetime_stats.json")
-_BANKROLL_FILE         = Path("logs/bankroll.json")
+_STATS_FILE             = Path("logs/lifetime_stats.json")
 _EXECUTOR_BANKROLL_FILE = Path("logs/executor_bankroll.json")
 
 def _load_pred_stats() -> tuple[int, int, int, int]:
@@ -176,11 +175,6 @@ class StateManager:
         self.session_res_pred_total: int = 0
         self.session_res_pred_correct: int = 0
 
-        self.bankroll: float = self._load_bankroll(default=starting_bankroll)
-        self.last_bet: float = 0.0
-        self.last_pnl: float = 0.0
-        self.session_pnl: float = 0.0
-
         # Executor position (one per window)
         self.trading_mode: str = trading_mode
         self.position: dict = {
@@ -321,19 +315,6 @@ class StateManager:
             else:
                 self.predicted_resolution = "NEUTRAL"
         self._dirty.set()
-
-    def _load_bankroll(self, default: float = 250.0) -> float:
-        try:
-            return float(json.loads(_BANKROLL_FILE.read_text())["bankroll"])
-        except Exception:
-            return default
-
-    def _save_bankroll(self) -> None:
-        try:
-            _BANKROLL_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _BANKROLL_FILE.write_text(json.dumps({"bankroll": round(self.bankroll, 2)}))
-        except Exception:
-            pass
 
     def _load_executor_bankroll(self, default: float) -> float:
         try:
@@ -557,13 +538,6 @@ class StateManager:
             "last_resolution_msg": self.last_resolution_msg,
             # Log
             "event_log": list(self.event_log)[:50],
-            # Bankroll (model accuracy tracking)
-            "bankroll": {
-                "balance":     round(self.bankroll, 2),
-                "last_bet":    round(self.last_bet, 2),
-                "last_pnl":    round(self.last_pnl, 2),
-                "session_pnl": round(self.session_pnl, 2),
-            },
             # Executor position + P&L
             "trading_mode":         self.trading_mode,
             "position":             dict(self.position),

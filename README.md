@@ -1,6 +1,6 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model combined with RSI/BB technical bias to decide direction, and places simulated or real orders when both signals agree.
+Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary context. Places simulated or real orders when the model has a clear edge.
 
 Switch between paper (simulated) and live (real money) by changing one line in `.env`.
 
@@ -19,14 +19,24 @@ Kalshi settles using CF Benchmarks' BRTI (averaged over the 60 seconds before cl
 
 ## How the bot decides to trade
 
-The executor uses a simple two-signal rule:
+The bot has two independent decision-makers that run simultaneously:
 
-1. **Technical bias** (RSI/BB from Coinbase 1-min candles) must have a directional view — `up` or `down`. If ADX < 20 the market is choppy and RSI/BB signals are suppressed → bias stays neutral → no trade.
-2. **GBM fair value** must agree with the bias — GBM > 55% for YES, < 45% for NO.
+### Executor (places actual trades)
 
-When both agree, the bot enters that side at the current market price using **10% of the executor bankroll**. When bias switches direction mid-window, the current position is closed at market and a new one opened in the opposite direction.
+1. **Technical bias** (RSI/BB from the last 20 Coinbase 1-min candles, locked at window open) must have a directional view — `up` or `down`. ADX < 15 forces neutral → no trade.
+2. **GBM fair value** must broadly agree — GBM > 55% for YES, GBM < 45% for NO.
 
-There is no stop-loss — the bias reversal mechanism handles mid-window risk.
+When both agree, the bot enters at market price using **10% of the executor bankroll**. When the bias switches direction mid-window, the current position is closed and a new one is opened in the opposite direction.
+
+### Recommendation panel (dashboard display)
+
+Decision hierarchy — first signal that fires wins:
+
+1. **GBM fair value** — if GBM < 35% → recommend NO; if GBM > 65% → recommend YES
+2. **BTC slope** — if GBM is neutral and slope is strong enough (> 0.30 $/s), slope drives the recommendation
+3. **No signal** → WAIT
+
+Technical bias is **informational only** in the recommendation panel — it is shown in the basis and counted in the signal score, but cannot block a GBM or slope recommendation. This is intentional: the 81% RSI/BB accuracy was measured from a small in-sample dataset and is likely overfit; GBM (82% over 99 windows) is more validated.
 
 ---
 
@@ -39,43 +49,44 @@ The GBM (Geometric Brownian Motion) model prices the probability that BTC closes
 - Current BTC velocity (slope of recent price) — so a fast-rising BTC scores higher even if still below strike
 - Volatility from Deribit DVOL (implied vol), or rolling realized vol as fallback
 
-Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The bot sees that gap and, if technicals also say bullish, buys YES.
+Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The recommendation panel won't fire here (GBM not past 65%/35%), but if GBM crosses 65% the bot recommends YES.
 
 ---
 
 ## Technical bias (RSI/BB)
 
-Fetched every **15 seconds** from Coinbase Exchange 1-minute candles (no auth required). Three indicators are computed:
+Fetched every **15 seconds between windows** (locked during active windows) from Coinbase Exchange 1-minute candles — last 20 candles (~20 minutes of data). Three indicators computed:
 
 | Indicator | Bullish condition | Bearish condition |
 |-----------|------------------|------------------|
-| RSI(14) | > 60 | < 40 |
-| Bollinger Band position | > 0.6 (near upper band) | < 0.4 (near lower band) |
-| ADX(14) | must be ≥ 20 for any signal to count | < 20 → all signals suppressed |
+| RSI(14) | < 40 (oversold → expect bounce up) | > 60 (overbought → expect reversal down) |
+| Bollinger Band position | < 0.4 (near lower band → oversold) | > 0.6 (near upper band → overbought) |
+| ADX(14) | must be ≥ 15 for any signal to count | < 15 → all signals suppressed |
 
-**ADX < 20 means the market is choppy** — RSI and BB give false signals in sideways markets so the bias is forced to neutral regardless of RSI/BB values.
+This uses **mean-reversion** logic — oversold conditions predict a bounce UP in the next 15 minutes. Confirmed on historical data; the opposite (momentum-following) interpretation tested at 19% accuracy.
 
-Bias logic: if at least one of RSI or BB fires in the same direction (and ADX ≥ 20), that direction wins. If they conflict or both are neutral, bias = neutral.
+**ADX < 15 means no trend** — RSI and BB signals are unreliable in flat/choppy markets so bias is forced to neutral.
+
+The bias is locked at window discovery and does not update mid-window. This prevents intra-window BTC crashes from flipping the bias on a bounce signal rather than a genuine directional change.
 
 ---
 
-## Recommendation panel
-
-The dashboard recommendation fires when GBM and technicals agree. Supporting signals are shown as informational context:
+## Recommendation panel signals
 
 | Signal | Source | Role |
 |--------|--------|------|
-| **GBM fair value** | Live BTC + DVOL | Primary — must agree with technicals |
-| **Technical bias** | Coinbase 1-min candles | Primary — must agree with GBM |
+| **GBM fair value** | Live BTC + DVOL | Primary — drives recommendation when < 35% or > 65% |
+| **BTC slope** | Coinbase spot price history | Fallback — drives when GBM neutral and slope > 0.30 $/s |
+| **Technical bias** | Coinbase 1-min candles (20-candle lookback) | Informational — shown in basis, cannot block GBM/slope |
 | BTC momentum | Coinbase spot | Informational |
 | CVD (order flow) | Coinbase trade stream | Informational |
 | Funding rate | OKX perp | Informational |
 | Orderbook imbalance | Kalshi order book | Informational |
 | Kalshi mid momentum | Kalshi mid price history | Informational |
 
-**Hard gate** (only thing that blocks the recommendation): entry price must be within 8–65¢. Below 8¢ the market is near-certain with no value to capture. Above 65¢ you risk more than you can win.
+**Hard gate**: entry price must be ≥ 30¢. Below this the market is pricing near-certainty and there is no value to capture.
 
-Commitment rate and GBM-market gap are shown as **⚠ warnings** in the basis panel but no longer block the recommendation — they are informational context for the trader.
+**GBM confidence gate**: technicals are suppressed entirely (not shown as conflicting) when GBM is below 20% or above 80% — at those extremes, BTC is so far from the strike that a general RSI/BB bounce signal is irrelevant.
 
 ---
 
@@ -137,10 +148,10 @@ main.py
   → BtcFeed.run()                   Coinbase BTC-USD price (ticker) + CVD (trade stream)
   → Analyzer.run()
       _analysis_loop()              GBM fair value + recommendation (every 50 ms)
-      _bias_refresher()             RSI/BB + DVOL + OKX basis/funding (every 15 s)
+      _bias_refresher()             RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
       _window_resolver()            settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_trade()                 enter/reverse based on bias+GBM agreement
+      maybe_trade()                 enter/reverse based on pre-window bias + GBM agreement
   → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
 ```
 
@@ -173,15 +184,17 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `PAPER_BANKROLL_RESET` | `0.0` | Set to a positive value to reset paper balance on next startup, then remove |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
+| `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (0.30 $/s ≈ $18/min) |
 | `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
 | `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Warning threshold: GBM vs Kalshi mid gap (shown as ⚠, does not block) |
-| `MIN_ENTRY_PRICE_CENTS` | `8.0` | Hard lower bound on entry price — below this market is near-certain |
-| `MAX_ENTRY_PRICE_CENTS` | `65.0` | Hard upper bound — above this you risk more than you can win |
-| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window opens when ≤ this many seconds remain |
-| `MIN_ENTRY_WINDOW_S` | `120.0` | Entry window closes when < this many seconds remain |
+| `MIN_ENTRY_PRICE_CENTS` | `30.0` | Hard lower bound on entry price — below this market is near-certain |
+| `MAX_ENTRY_PRICE_CENTS` | `85.0` | Upper bound (executor only — recommendation panel does not enforce this) |
+| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window indicator threshold (seconds remaining) |
+| `MIN_ENTRY_WINDOW_S` | `120.0` | Minimum entry window threshold (seconds remaining) |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |
 | `MIN_OPEN_INTEREST` | `500` | Thin-market flag threshold (contracts) |
+| `MIN_ADX_THRESHOLD` | `15.0` | ADX below this forces technical bias to neutral |
 | `BINANCE_SYMBOL` | `BTC-USD` | Coinbase product ID for candle fetch |
 | `BINANCE_KLINES_INTERVAL` | `60` | Candle granularity in seconds (Coinbase supports: 60, 300, 900, 3600) |
 | `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind host |
@@ -208,4 +221,5 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 - **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but the bot only trades when bias and GBM agree.
-- **Technicals edge.** The `technicals_discovery.csv` file is accumulating discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows. Resolution-time analysis (where RSI reflects the price move that already happened) is circular and should not be used to evaluate predictive accuracy.
+- **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows. The 20-candle lookback (~20 minutes) reflects the immediate pre-window momentum — the prior 100-candle (~90 minute) lookback was too slow to capture recent directional shifts.
+- **Two strategies.** The executor and recommendation panel use different primary signals and thresholds on purpose. The executor's pre-window bias + GBM confirmation has been empirically profitable. The recommendation panel's GBM-primary approach is more conservative (requires GBM < 35% or > 65%). Do not merge them until side-by-side accuracy data (50+ windows) justifies it.

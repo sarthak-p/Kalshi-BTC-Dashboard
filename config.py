@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     min_entry_window_s: float = Field(default=120.0, env="MIN_ENTRY_WINDOW_S")
 
     # ── Sweet-spot price range (informational — helps pick entry price) ───────
-    min_entry_price_cents: float = Field(default=60.0, env="MIN_ENTRY_PRICE_CENTS")
+    # min: below this the contract is priced too cheap (early-window ~50¢ is fine)
+    # max: above this the risk/reward is bad (paying 85¢ to win 15¢)
+    min_entry_price_cents: float = Field(default=30.0, env="MIN_ENTRY_PRICE_CENTS")
     max_entry_price_cents: float = Field(default=85.0, env="MAX_ENTRY_PRICE_CENTS")
 
     # ── BTC momentum threshold for recommendation ─────────────────────────────
@@ -65,9 +67,18 @@ class Settings(BaseSettings):
     max_line_crossings: int = Field(default=2, env="MAX_LINE_CROSSINGS")
     min_direction_consistency: float = Field(default=0.6, env="MIN_DIRECTION_CONSISTENCY")
 
+    # ── BTC slope signal threshold ────────────────────────────────────────────
+    # Minimum |slope| in $/s to treat as a directional signal.
+    # Drives the recommendation when GBM is neutral (early-window fallback).
+    # 0.30 $/s ≈ $18/min — a clear pre-window trend.
+    btc_slope_signal_threshold: float = Field(default=0.30, env="BTC_SLOPE_SIGNAL_THRESHOLD")
+
     # ── Pre-window technical analysis ─────────────────────────────────────────
     binance_symbol: str = Field(default="BTC-USD", env="BINANCE_SYMBOL")
     binance_klines_interval: str = Field(default="60", env="BINANCE_KLINES_INTERVAL")
+    # ADX below this → bias forced neutral (RSI/BB unreliable in ranging markets)
+    # Standard: < 15 = no trend, 15–25 = weak trend, > 25 = strong trend
+    min_adx_threshold: float = Field(default=15.0, env="MIN_ADX_THRESHOLD")
 
     # ── Dashboard ────────────────────────────────────────────────────────────
     dashboard_host: str = Field(default="127.0.0.1", env="DASHBOARD_HOST")

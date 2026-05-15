@@ -546,7 +546,7 @@ function renderMarketConditions(s) {
     const adx = tech.adx;
     document.getElementById('adx-val').textContent = adx.toFixed(1);
     document.getElementById('adx-val').style.color = adx > 30 ? 'var(--green)' : adx < 20 ? 'var(--yellow)' : 'var(--text)';
-    document.getElementById('adx-label').textContent = adx > 30 ? 'strong trend — RSI/BB reliable' : adx < 20 ? 'choppy — RSI/BB signals suppressed' : 'moderate trend';
+    document.getElementById('adx-label').textContent = adx > 25 ? 'strong trend — RSI/BB reliable' : adx < 15 ? 'ranging — RSI/BB signals suppressed' : 'weak trend — RSI/BB active';
   }
 
   // Pre-window bias
@@ -600,12 +600,12 @@ function renderRecommendation(s) {
   const phaseBadge = document.getElementById('rec-phase-badge');
 
   // Phase badge
-  if (tau > 240) {
-    phaseBadge.textContent = tau > 900 ? 'MONITORING' : '✓ ENTRY WINDOW';
-    phaseBadge.style.color = tau > 900 ? 'var(--muted)' : 'var(--green)';
+  if (tau > 900) {
+    phaseBadge.textContent = 'MONITORING';
+    phaseBadge.style.color = 'var(--muted)';
   } else if (tau > 0) {
-    phaseBadge.textContent = '✗ TOO LATE';
-    phaseBadge.style.color = 'var(--red)';
+    phaseBadge.textContent = '✓ ENTRY WINDOW';
+    phaseBadge.style.color = 'var(--green)';
   } else {
     phaseBadge.textContent = '—';
     phaseBadge.style.color = 'var(--muted)';
@@ -621,12 +621,21 @@ function renderRecommendation(s) {
     actEl.textContent = '—  WAIT'; actEl.className = 'neutral';
   }
 
-  if (rec.entry_price != null && side) {
-    const lp = Math.max(8, rec.entry_price - 5);
-    entEl.textContent = `Market: ${rec.entry_price.toFixed(1)}¢  ·  Limit bid: ~${lp.toFixed(1)}¢  ·  ${rec.signal_count}/7 signals`;
-    entEl.style.color = 'var(--text)';
+  if (side) {
+    const ob = s.orderbook || {};
+    const livePrice = side === 'YES'
+      ? ob.best_ask
+      : (ob.best_bid != null ? 100 - ob.best_bid : null);
+    if (livePrice != null) {
+      const lp = Math.max(8, livePrice - 5);
+      entEl.textContent = `Market: ${livePrice.toFixed(1)}¢  ·  Limit bid: ~${lp.toFixed(1)}¢  ·  ${rec.signal_count}/6 signals`;
+      entEl.style.color = 'var(--text)';
+    } else {
+      entEl.textContent = 'No orderbook data';
+      entEl.style.color = 'var(--muted)';
+    }
   } else {
-    entEl.textContent = side ? 'No orderbook data' : 'Signals conflicting or insufficient';
+    entEl.textContent = 'Signals conflicting or insufficient';
     entEl.style.color = 'var(--muted)';
   }
 
@@ -640,13 +649,7 @@ function renderRecommendation(s) {
     return `<div style="color:${color}">${escHtml(b)}</div>`;
   }).join('');
 
-  // Phase warning
-  if (tau <= 240 && tau > 0 && side) {
-    warnEl.textContent = '⚠ Entry window closed — too late to enter';
-    warnEl.style.display = 'block';
-  } else {
-    warnEl.style.display = 'none';
-  }
+  warnEl.style.display = 'none';
 }
 
 // ── BTC panel ───────────────────────────────────────────────────────────────

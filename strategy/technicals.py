@@ -48,8 +48,9 @@ class TechnicalBias:
 
 async def fetch_bias(
     symbol: str = "BTC-USD",
-    interval: str = "60",   # granularity in seconds (str for config compat)
+    interval: str = "60",
     limit: int = 50,
+    min_adx: float = 15.0,
 ) -> Optional[TechnicalBias]:
     """Fetch Coinbase Exchange candles and compute directional bias. Returns None on any error."""
     try:
@@ -78,7 +79,7 @@ async def fetch_bias(
     rsi             = _rsi(closes)
     adx             = _adx(highs, lows, closes)
     bb_pos, bb_wid  = _bb_position(closes)
-    bias            = _classify(rsi, bb_pos, adx)
+    bias            = _classify(rsi, bb_pos, adx, min_adx=min_adx)
     return TechnicalBias(
         rsi=round(rsi, 1),
         adx=round(adx, 1),
@@ -146,12 +147,14 @@ async def _fetch_okx_sentiment() -> Optional[tuple[float, float]]:
 
 # ── Indicator calculations ────────────────────────────────────────────────────
 
-def _classify(rsi: float, bb_pos: float, adx: float = 25.0) -> str:
-    if adx < 20:
-        return "neutral"   # choppy market — don't trust RSI/BB signals
-    # Trend-continuation: RSI > 60 = sustained buying momentum; RSI < 40 = sustained selling
-    bull = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
-    bear = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
+def _classify(rsi: float, bb_pos: float, adx: float = 25.0, min_adx: float = 15.0) -> str:
+    if adx < min_adx:
+        return "neutral"   # ranging market — RSI/BB signals not reliable below this ADX
+    # Mean-reversion interpretation (confirmed by 117-window backtest):
+    # oversold (low RSI, near lower BB) → price likely bounces UP in next 15 min
+    # overbought (high RSI, near upper BB) → price likely reverts DOWN
+    bull = (1 if rsi < 40 else 0) + (1 if bb_pos < 0.4 else 0)
+    bear = (1 if rsi > 60 else 0) + (1 if bb_pos > 0.6 else 0)
     if bull >= 1 and bull > bear:
         return "up"
     if bear >= 1 and bear > bull:
