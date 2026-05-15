@@ -11,6 +11,7 @@ then enter the new side — works correctly in both paper and live mode.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 
@@ -19,7 +20,7 @@ from feeds.kalshi_ws import _make_rest_headers
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
-_UNIT_SIZE_USD = 1.0  # fixed dollars risked per trade
+_UNIT_SIZE_USD = 5.0  # fixed dollars risked per trade
 
 
 class Executor:
@@ -28,6 +29,7 @@ class Executor:
         self.cfg    = cfg
         self.logger = logger
         self._attempted_contract: str | None = None  # prevents retry spam on failed orders
+        self._rec_side_since: tuple[str | None, float] = (None, 0.0)  # (side, timestamp) for stability gate
 
     async def startup(self) -> None:
         """Call once at boot. In live mode, seeds executor_bankroll from Kalshi."""
@@ -72,6 +74,7 @@ class Executor:
         contract = self.state.active_contract
         if not contract:
             self._attempted_contract = None  # reset for next window
+            self._rec_side_since = (None, 0.0)
             return
 
         # Don't retry a failed order in the same window — wait for the next contract
@@ -80,6 +83,21 @@ class Executor:
 
         target_side = self.state.recommendation.get("side")
         if not target_side:
+            self._rec_side_since = (None, time.time())
+            return
+
+        # Track how long the current recommendation side has been stable
+        last_side, since_ts = self._rec_side_since
+        if target_side != last_side:
+            self._rec_side_since = (target_side, time.time())
+            return  # just flipped — start the 60s stability clock
+        if time.time() - since_ts < 60.0:
+            return  # signal hasn't held long enough yet
+
+        # Require meaningful GBM edge over the market price (8¢ minimum gap)
+        fv  = self.state.prediction_yes_pct
+        mid = self.state.orderbook.mid()
+        if mid is not None and abs(fv - mid) < 8.0:
             return
 
         pos = self.state.position

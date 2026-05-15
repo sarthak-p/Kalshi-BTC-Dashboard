@@ -33,7 +33,7 @@ Technical bias (RSI/BB) is **informational only** — shown in the dashboard bas
 
 ### Trade lifecycle
 
-- **Entry**: fires within one analysis tick (50ms) of the recommendation appearing. Orders submit at ask+10¢ (buys) or bid−10¢ (sells) so they cross the spread immediately regardless of fast-moving bots.
+- **Entry**: fires after the recommendation has held stable for **60 seconds** and GBM disagrees with the Kalshi mid price by at least **8¢**. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately regardless of fast-moving bots.
 - **Hold**: position sits untouched as long as the recommendation stays on the same side or goes to WAIT
 - **Reversal**: only happens if the recommendation flips to the opposite side and holds there for **60 seconds** (flip lock). Early break only if GBM swings 30+ points against the position (e.g. locked YES and GBM drops below 35%).
 - **Settlement**: at window close the position is marked won/lost regardless of current recommendation
@@ -191,7 +191,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (0.30 $/s ≈ $18/min) |
 | `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
-| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Warning threshold: GBM vs Kalshi mid gap (shown as ⚠, does not block) |
+| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Hard entry gate: executor skips entry if GBM vs Kalshi mid gap < 8¢ (no edge) |
 | `MIN_ENTRY_PRICE_CENTS` | `30.0` | Hard lower bound on entry price — below this market is near-certain |
 | `MAX_ENTRY_PRICE_CENTS` | `85.0` | Upper bound (executor only — recommendation panel does not enforce this) |
 | `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window indicator threshold (seconds remaining) |
@@ -228,3 +228,4 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but the bot only trades when bias and GBM agree.
 - **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows. The 20-candle lookback (~20 minutes) reflects the immediate pre-window momentum — the prior 100-candle (~90 minute) lookback was too slow to capture recent directional shifts.
 - **Unified strategy.** The executor now follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 65% → YES) with slope as a fallback. RSI/BB is informational context only. GBM accuracy validated at 78.6% over 28 directional calls across 122 windows.
+- **Position sizing.** Flat $5 per trade regardless of bankroll. At 40¢ entry this buys ~12 contracts; at 60¢ entry ~8 contracts. Entry only fires after the signal has held stable for 60 seconds and GBM disagrees with the Kalshi mid by at least 8¢ — both filters reduce noise trades.
