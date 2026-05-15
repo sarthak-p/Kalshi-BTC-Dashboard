@@ -80,8 +80,11 @@ class Executor:
         if contract == self._attempted_contract:
             return
 
-        # Only act once the model has locked its decision at the 8-min mark
+        # Only act once the model has locked its decision at the 8-min mark,
+        # and only if that lock was set for this specific contract (not a prior window's lock).
         if not self.state.final_model_locked:
+            return
+        if self.state.final_model_contract != contract:
             return
 
         target_side = self.state.final_model_side

@@ -189,6 +189,7 @@ class StateManager:
         # This is what the executor acts on and what determines model correctness in logs.
         self.final_model_side: Optional[str] = None   # "YES" | "NO" | None
         self.final_model_locked: bool = False
+        self.final_model_contract: Optional[str] = None  # contract the lock was set for
 
         # External market data
         self.dvol: float = 0.0                   # Deribit DVOL index (annualized %)
@@ -339,6 +340,7 @@ class StateManager:
             self.prediction_locked = False
             self.final_model_side = None
             self.final_model_locked = False
+            self.final_model_contract = None
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
@@ -481,6 +483,7 @@ class StateManager:
             return  # keep retrying until a real signal appears
         self.final_model_side = side
         self.final_model_locked = True
+        self.final_model_contract = self.active_contract
 
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
