@@ -100,17 +100,6 @@ class Executor:
         if mid is not None and abs(fv - mid) < 8.0:
             return
 
-        pos = self.state.position
-        in_contract = pos["status"] == "open" and pos["ticker"] == contract
-
-        # Already holding the right side — nothing to do
-        if in_contract and pos["side"] == target_side:
-            return
-
-        # Recommendation flipped — close current position before reversing
-        if in_contract and pos["side"] != target_side:
-            await self._close_position(contract, pos)
-
         ob = self.state.orderbook
         if target_side == "YES":
             price = ob.best_ask()
@@ -123,6 +112,19 @@ class Executor:
 
         if price < self.cfg.min_entry_price_cents or price > self.cfg.max_entry_price_cents:
             return
+
+        pos = self.state.position
+        in_contract = pos["status"] == "open" and pos["ticker"] == contract
+
+        # Already holding the right side — nothing to do
+        if in_contract and pos["side"] == target_side:
+            return
+
+        # Recommendation flipped — only close if the new side is enterable at a valid price.
+        # Skipping this check caused crystallising full losses (e.g. close NO at 3¢ when YES
+        # is at 97¢, then being blocked from entering YES by the max-price ceiling).
+        if in_contract and pos["side"] != target_side:
+            await self._close_position(contract, pos)
 
         n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
 

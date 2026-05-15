@@ -174,8 +174,8 @@ def _compute_recommendation(
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value
-    if fv > 65:
+    # GBM fair-value (YES requires >70% — data shows UP calls are weaker than DOWN)
+    if fv > 70:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
     elif fv < 35:
@@ -232,6 +232,11 @@ def _compute_recommendation(
             basis.append("Technicals: neutral (slope driving)")
         else:
             basis.append(f"Technicals: {bias} confirms slope")
+    elif bias_side == "NO":
+        # bias=down is 73% accurate standalone — promote to trigger when GBM+slope neutral.
+        # bias=up is 50% (coin flip) so it is never promoted here.
+        side = "NO"
+        basis.append("Technicals: bearish (bias driving — GBM+slope neutral)")
     else:
         side = None
         if bias_side is not None:
@@ -511,7 +516,7 @@ class Analyzer:
         # same ≤35%/≥65% boundary used by the executor so display and execution stay aligned.
         gbm_strongly_opposes = (
             (locked == "YES" and fv <= 35.0) or
-            (locked == "NO"  and fv >= 65.0)
+            (locked == "NO"  and fv >= 70.0)
         )
 
         if current_side is not None:
@@ -616,7 +621,7 @@ class Analyzer:
                 btc_at_close=self.state.btc_price,
                 btc_open=self.state.btc_open,
                 predicted_dir=self.state.prediction_locked_direction,
-                prediction_yes_pct=self.state.prediction_yes_pct,
+                prediction_yes_pct=self.state.prediction_locked_yes_pct,
                 pre_window_bias=self.state.pre_window_bias,
                 bias_at_discovery=self.state.bias_at_discovery,
                 predicted_resolution=self.state.predicted_resolution,

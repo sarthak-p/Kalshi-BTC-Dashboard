@@ -127,6 +127,7 @@ class StateManager:
 
         # Prediction locked at first entry-open tick (used for accuracy scoring)
         self.prediction_locked_direction: str = "NEUTRAL"
+        self.prediction_locked_yes_pct: float = 50.0
         self.prediction_locked: bool = False
 
         # External market data
@@ -270,6 +271,7 @@ class StateManager:
             self.cvd_total = 0.0
             self.cvd_history.clear()
             self.prediction_locked_direction = "NEUTRAL"
+            self.prediction_locked_yes_pct = 50.0
             self.prediction_locked = False
         self._dirty.set()
 
@@ -392,6 +394,7 @@ class StateManager:
                 self.prediction_locked = True
                 return
         self.prediction_locked_direction = self.predicted_direction
+        self.prediction_locked_yes_pct = self.prediction_yes_pct
         self.prediction_locked = True
 
     async def update_open_interest(self, oi: float) -> None:

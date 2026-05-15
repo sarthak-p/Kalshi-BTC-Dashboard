@@ -25,17 +25,18 @@ The executor and recommendation panel run the same strategy. The executor trades
 
 First signal that fires wins:
 
-1. **GBM fair value** — if GBM < 35% → NO; if GBM > 65% → YES
-2. **BTC slope** — if GBM is neutral and slope > 0.30 $/s → slope drives
-3. **No signal** → WAIT / no trade
+1. **GBM fair value** — if GBM < 35% → NO; if GBM > 70% → YES (asymmetric: YES requires stronger signal, data shows YES calls are weaker than NO calls)
+2. **BTC slope** — if GBM neutral and |slope| > 0.30 $/s → slope drives
+3. **Technical bias=down** — if GBM+slope both neutral and RSI/BB signals bearish → NO (73% accuracy standalone)
+4. **No signal** → WAIT / no trade
 
-Technical bias (RSI/BB) is **informational only** — shown in the dashboard basis and counted in the signal score, but cannot block a GBM or slope call.
+`bias=up` is **not** a standalone trigger — 50% accuracy in live data. It is shown in the dashboard basis as informational only.
 
 ### Trade lifecycle
 
 - **Entry**: fires after the recommendation has held stable for **60 seconds** and GBM disagrees with the Kalshi mid price by at least **8¢**. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately regardless of fast-moving bots.
 - **Hold**: position sits untouched as long as the recommendation stays on the same side or goes to WAIT
-- **Reversal**: only happens if the recommendation flips to the opposite side and holds there for **60 seconds** (flip lock). Early break only if GBM swings 30+ points against the position (e.g. locked YES and GBM drops below 35%).
+- **Reversal**: only happens if the recommendation flips to the opposite side and holds there for **60 seconds** (flip lock) AND the new side's price is within the 30–85¢ entry range (prevents closing a position at a terrible price when the reversal can't actually be entered). Early break only if GBM strongly opposes the locked side (locked YES and GBM ≤ 35%, or locked NO and GBM ≥ 70%).
 - **Settlement**: at window close the position is marked won/lost regardless of current recommendation
 - **Unfilled order guard**: if a buy or sell order is confirmed resting (not filled) after 3 seconds, it is cancelled on Kalshi and the position state rolls back — prevents holding two real positions with one in local state
 
@@ -50,7 +51,7 @@ The GBM (Geometric Brownian Motion) model prices the probability that BTC closes
 - Current BTC velocity (slope of recent price) — so a fast-rising BTC scores higher even if still below strike
 - Volatility from Deribit DVOL (implied vol), or rolling realized vol as fallback
 
-Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The recommendation panel won't fire here (GBM not past 65%/35%), but if GBM crosses 65% the bot recommends YES.
+Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The recommendation panel won't fire here (GBM not past 70%/35%), but if GBM crosses 70% the bot recommends YES.
 
 ---
 
@@ -64,9 +65,9 @@ Fetched every **15 seconds between windows** (locked during active windows) from
 | Bollinger Band position | > 0.6 (near upper band → uptrend) | < 0.4 (near lower band → downtrend) |
 | ADX(14) | must be ≥ 15 for any signal to count | < 15 → all signals suppressed |
 
-This uses **momentum-following** logic — live data (122 windows) showed:
-- `bias=down` (RSI < 40): 80% accurate → BTC in a downtrend keeps going down
-- `bias=up` (RSI > 60): 58% accurate → BTC in an uptrend keeps going up
+This uses **momentum-following** logic — live data showed:
+- `bias=down` (RSI < 40): **73% accurate** → BTC in a downtrend keeps going down. Now a standalone NO trigger when GBM+slope are both neutral.
+- `bias=up` (RSI > 60): **50% accurate** → coin flip. Informational only, never a trade trigger.
 
 Mean-reversion interpretation (oversold = expect bounce) was tested and rejected — the "up" signal was 20% accurate, effectively backwards.
 
@@ -80,9 +81,10 @@ The bias is locked at window discovery and does not update mid-window. This prev
 
 | Signal | Source | Role |
 |--------|--------|------|
-| **GBM fair value** | Live BTC + DVOL | Primary — drives recommendation when < 35% or > 65% |
-| **BTC slope** | Coinbase spot price history | Fallback — drives when GBM neutral and slope > 0.30 $/s |
-| **Technical bias** | Coinbase 1-min candles (35-candle lookback) | Informational — shown in basis, cannot block GBM/slope |
+| **GBM fair value** | Live BTC + DVOL | Primary — drives when GBM < 35% (NO) or > 70% (YES) |
+| **BTC slope** | Coinbase spot price history | Secondary — drives when GBM neutral and \|slope\| > 0.30 $/s |
+| **Technical bias=down** | Coinbase 1-min candles (35-candle lookback) | Tertiary — standalone NO trigger when GBM+slope neutral (73% accurate) |
+| **Technical bias=up** | Coinbase 1-min candles | Informational only — 50% accuracy, not a trade trigger |
 | BTC momentum | Coinbase spot | Informational |
 | CVD (order flow) | Coinbase trade stream | Informational |
 | Funding rate | OKX perp | Informational |
