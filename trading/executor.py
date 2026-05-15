@@ -19,7 +19,7 @@ from feeds.kalshi_ws import _make_rest_headers
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
-_UNIT_SIZE_USD = 5.0  # fixed dollars risked per trade
+_UNIT_SIZE_USD = 100.0  # fixed dollars risked per trade
 
 
 class Executor:
@@ -86,12 +86,6 @@ class Executor:
         if not target_side:
             return
 
-        # Require meaningful GBM edge over the market price (8¢ minimum gap)
-        fv  = self.state.prediction_yes_pct
-        mid = self.state.orderbook.mid()
-        if mid is not None and abs(fv - mid) < 8.0:
-            return
-
         ob = self.state.orderbook
         if target_side == "YES":
             price = ob.best_ask()
@@ -100,9 +94,6 @@ class Executor:
             price = (100.0 - yes_bid) if yes_bid is not None else None
 
         if not price:
-            return
-
-        if price < self.cfg.min_entry_price_cents or price > self.cfg.max_entry_price_cents:
             return
 
         pos = self.state.position

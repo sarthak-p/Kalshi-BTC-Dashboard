@@ -547,19 +547,20 @@ function renderMarketConditions(s) {
   const tech = s.technicals || {};
   const left = s.window_seconds_left || 0;
 
-  // Phase
+  // Phase — use the server-computed value so thresholds stay in sync with config
+  const phase    = (s.analysis && s.analysis.phase) || 'waiting';
   const phaseEl  = document.getElementById('phase-val');
   const phaseBadge = document.getElementById('phase-badge');
-  if (!s.active_contract) {
+  if (!s.active_contract || phase === 'waiting') {
     phaseEl.textContent = 'NO CONTRACT'; phaseEl.style.color = 'var(--muted)';
     phaseBadge.textContent = '—'; phaseBadge.style.color = 'var(--muted)';
-  } else if (left > 900) {
+  } else if (phase === 'monitoring') {
     phaseEl.textContent = 'MONITORING'; phaseEl.style.color = 'var(--muted)';
-    phaseBadge.textContent = 'waiting'; phaseBadge.style.color = 'var(--muted)';
-  } else if (left > 240) {
+    phaseBadge.textContent = 'monitoring'; phaseBadge.style.color = 'var(--muted)';
+  } else if (phase === 'entry_open') {
     phaseEl.textContent = 'ENTRY OPEN'; phaseEl.style.color = 'var(--green)';
     phaseBadge.textContent = '✓ ENTRY WINDOW'; phaseBadge.style.color = 'var(--green)';
-  } else if (left > 30) {
+  } else if (phase === 'too_late') {
     phaseEl.textContent = 'TOO LATE'; phaseEl.style.color = 'var(--red)';
     phaseBadge.textContent = '✗ TOO LATE'; phaseBadge.style.color = 'var(--red)';
   } else {
@@ -625,16 +626,20 @@ function renderRecommendation(s) {
   const warnEl   = document.getElementById('rec-phase-warn');
   const phaseBadge = document.getElementById('rec-phase-badge');
 
-  // Phase badge
-  if (tau > 900) {
+  // Phase badge — mirror the server-computed phase
+  const recPhase = (s.analysis && s.analysis.phase) || 'waiting';
+  if (!s.active_contract || recPhase === 'waiting') {
+    phaseBadge.textContent = '—';
+    phaseBadge.style.color = 'var(--muted)';
+  } else if (recPhase === 'monitoring') {
     phaseBadge.textContent = 'MONITORING';
     phaseBadge.style.color = 'var(--muted)';
-  } else if (tau > 0) {
+  } else if (recPhase === 'entry_open') {
     phaseBadge.textContent = '✓ ENTRY WINDOW';
     phaseBadge.style.color = 'var(--green)';
   } else {
-    phaseBadge.textContent = '—';
-    phaseBadge.style.color = 'var(--muted)';
+    phaseBadge.textContent = '✗ TOO LATE';
+    phaseBadge.style.color = 'var(--red)';
   }
 
   const yp   = s.prediction_yes_pct;

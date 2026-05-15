@@ -37,7 +37,6 @@ async def main() -> None:
     await state.log_event(
         f"Dashboard started — env={settings.kalshi_env}  "
         f"mode={settings.trading_mode.upper()}  "
-        f"entry={settings.min_entry_price_cents:.0f}–{settings.max_entry_price_cents:.0f}¢  "
         f"momentum=${settings.momentum_entry_usd:.0f}  "
         f"bankroll=${state.executor_bankroll:.2f}"
     )

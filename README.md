@@ -1,6 +1,6 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary context. Places simulated or real orders when the model has a clear edge.
+Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary context. Places simulated or real orders whenever the model has a recommendation.
 
 Switch between paper (simulated) and live (real money) by changing one line in `.env`.
 
@@ -19,25 +19,25 @@ Kalshi settles using CF Benchmarks' BRTI (averaged over the 60 seconds before cl
 
 ## How the bot decides to trade
 
-The executor and recommendation panel run the same strategy. The executor trades whatever the recommendation panel shows.
+The executor follows the recommendation panel directly — both use the same signal hierarchy.
 
-### Decision hierarchy (both executor and recommendation panel)
+### Decision hierarchy
 
 First signal that fires wins:
 
 1. **GBM fair value** — if GBM < 35% → NO; if GBM > 70% → YES (asymmetric: YES requires stronger signal, data shows YES calls are weaker than NO calls)
-2. **BTC slope** — if GBM neutral and |slope| > 0.30 $/s → slope drives
-3. **Technical bias=down** — if GBM+slope both neutral and RSI/BB signals bearish → NO (73% accuracy standalone)
+2. **BTC slope** — if GBM neutral and |slope| > 0.30 $/s and GBM confirms (> 60% for YES, < 40% for NO) → slope drives
+3. **Technical bias=down** — if GBM+slope both neutral and GBM < 40% → NO
 4. **No signal** → WAIT / no trade
 
 `bias=up` is **not** a standalone trigger — 50% accuracy in live data. It is shown in the dashboard basis as informational only.
 
 ### Trade lifecycle
 
-- **Entry**: fires after the recommendation has held stable for **60 seconds** and GBM disagrees with the Kalshi mid price by at least **8¢**. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately regardless of fast-moving bots.
-- **Hold**: position sits untouched as long as the recommendation stays on the same side or goes to WAIT
-- **Reversal**: only happens if the recommendation flips to the opposite side and holds there for **60 seconds** (flip lock) AND the new side's price is within the 30–85¢ entry range (prevents closing a position at a terrible price when the reversal can't actually be entered). Early break only if GBM strongly opposes the locked side (locked YES and GBM ≤ 35%, or locked NO and GBM ≥ 70%).
-- **Settlement**: at window close the position is marked won/lost regardless of current recommendation
+- **Entry**: at the **8-minute mark** (`entry_open` phase), the model locks its recommendation. The executor places one trade per window based on that locked decision. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately.
+- **Hold**: position sits untouched until window close or a reversal
+- **Reversal**: if the recommendation flips to the opposite side and holds for **60 seconds** (flip lock), the executor closes the existing position and enters the new side. Early break only if GBM strongly opposes the locked side (locked YES and GBM ≤ 35%, or locked NO and GBM ≥ 70%).
+- **Settlement**: at window close the position is marked won/lost based on the official Kalshi result
 - **Unfilled order guard**: if a buy or sell order is confirmed resting (not filled) after 3 seconds, it is cancelled on Kalshi and the position state rolls back — prevents holding two real positions with one in local state
 
 ---
@@ -51,7 +51,7 @@ The GBM (Geometric Brownian Motion) model prices the probability that BTC closes
 - Current BTC velocity (slope of recent price) — so a fast-rising BTC scores higher even if still below strike
 - Volatility from Deribit DVOL (implied vol), or rolling realized vol as fallback
 
-Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The recommendation panel won't fire here (GBM not past 70%/35%), but if GBM crosses 70% the bot recommends YES.
+Example: BTC is -$80 from strike with 350s left but rising at $1.20/s. The market prices YES at 28¢. The drift-adjusted GBM says 52¢. The recommendation panel won't fire here (GBM not past 70%/35%), but if GBM crosses 70% the bot recommends YES and the executor buys.
 
 ---
 
@@ -66,7 +66,7 @@ Fetched every **15 seconds between windows** (locked during active windows) from
 | ADX(14) | must be ≥ 15 for any signal to count | < 15 → all signals suppressed |
 
 This uses **momentum-following** logic — live data showed:
-- `bias=down` (RSI < 40): **73% accurate** → BTC in a downtrend keeps going down. Now a standalone NO trigger when GBM+slope are both neutral.
+- `bias=down` (RSI < 40): **73% accurate** → BTC in a downtrend keeps going down. Standalone NO trigger when GBM+slope are both neutral and GBM < 40%.
 - `bias=up` (RSI > 60): **50% accurate** → coin flip. Informational only, never a trade trigger.
 
 Mean-reversion interpretation (oversold = expect bounce) was tested and rejected — the "up" signal was 20% accurate, effectively backwards.
@@ -83,7 +83,7 @@ The bias is locked at window discovery and does not update mid-window. This prev
 |--------|--------|------|
 | **GBM fair value** | Live BTC + DVOL | Primary — drives when GBM < 35% (NO) or > 70% (YES) |
 | **BTC slope** | Coinbase spot price history | Secondary — drives when GBM neutral and \|slope\| > 0.30 $/s |
-| **Technical bias=down** | Coinbase 1-min candles (35-candle lookback) | Tertiary — standalone NO trigger when GBM+slope neutral (73% accurate) |
+| **Technical bias=down** | Coinbase 1-min candles (35-candle lookback) | Tertiary — standalone NO trigger when GBM+slope neutral and GBM < 40% |
 | **Technical bias=up** | Coinbase 1-min candles | Informational only — 50% accuracy, not a trade trigger |
 | BTC momentum | Coinbase spot | Informational |
 | CVD (order flow) | Coinbase trade stream | Informational |
@@ -91,9 +91,9 @@ The bias is locked at window discovery and does not update mid-window. This prev
 | Orderbook imbalance | Kalshi order book | Informational |
 | Kalshi mid momentum | Kalshi mid price history | Informational |
 
-**Hard gate**: entry price must be ≥ 30¢. Below this the market is pricing near-certainty and there is no value to capture.
+**GBM confidence gate**: technicals are suppressed entirely when GBM is below 20% or above 80% — at those extremes, BTC is so far from the strike that a general RSI/BB bounce signal is irrelevant.
 
-**GBM confidence gate**: technicals are suppressed entirely (not shown as conflicting) when GBM is below 20% or above 80% — at those extremes, BTC is so far from the strike that a general RSI/BB bounce signal is irrelevant.
+The executor places a trade whenever the model produces a recommendation — there is no separate price-range or edge-gap gate blocking execution.
 
 ---
 
@@ -158,7 +158,7 @@ main.py
       _bias_refresher()             RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
       _window_resolver()            settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_trade()                 enter/reverse based on model recommendation panel
+      maybe_trade()                 enter/reverse based on locked model recommendation
   → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
 ```
 
@@ -193,11 +193,11 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (0.30 $/s ≈ $18/min) |
 | `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
-| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Hard entry gate: executor skips entry if GBM vs Kalshi mid gap < 8¢ (no edge) |
-| `MIN_ENTRY_PRICE_CENTS` | `30.0` | Hard lower bound on entry price — below this market is near-certain |
-| `MAX_ENTRY_PRICE_CENTS` | `85.0` | Upper bound (executor only — recommendation panel does not enforce this) |
-| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window indicator threshold (seconds remaining) |
-| `MIN_ENTRY_WINDOW_S` | `120.0` | Minimum entry window threshold (seconds remaining) |
+| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Warning threshold: GBM vs Kalshi mid gap (shown as ⚠ in basis, does not block) |
+| `MIN_ENTRY_PRICE_CENTS` | `30.0` | Used in dashboard phase indicator — no longer blocks execution |
+| `MAX_ENTRY_PRICE_CENTS` | `85.0` | Used in dashboard phase indicator — no longer blocks execution |
+| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window indicator threshold (seconds remaining) — 8-min mark |
+| `MIN_ENTRY_WINDOW_S` | `120.0` | "Too late" threshold (seconds remaining) |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |
 | `MIN_OPEN_INTEREST` | `500` | Thin-market flag threshold (contracts) |
@@ -227,7 +227,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 - **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract. At 40¢ entry, round-trip taker cost is ~1.7¢ per contract. Not deducted from sizing — factor into profitability analysis.
 - **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
-- **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but the bot only trades when bias and GBM agree.
-- **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows. The 20-candle lookback (~20 minutes) reflects the immediate pre-window momentum — the prior 100-candle (~90 minute) lookback was too slow to capture recent directional shifts.
-- **Unified strategy.** The executor now follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 65% → YES) with slope as a fallback. RSI/BB is informational context only. GBM accuracy validated at 78.6% over 28 directional calls across 122 windows.
-- **Position sizing.** Flat $5 per trade regardless of bankroll. At 40¢ entry this buys ~12 contracts; at 60¢ entry ~8 contracts. Entry only fires after the signal has held stable for 60 seconds and GBM disagrees with the Kalshi mid by at least 8¢ — both filters reduce noise trades.
+- **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but only fires a recommendation when GBM or slope thresholds are met.
+- **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows.
+- **Unified strategy.** The executor follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 70% → YES) with slope as a fallback. The executor places a trade for every recommendation the model locks at the 8-minute mark, with no additional price-range or edge-gap filters.
+- **Position sizing.** Flat $5 per trade regardless of bankroll. At 40¢ entry this buys ~12 contracts; at 60¢ entry ~8 contracts.

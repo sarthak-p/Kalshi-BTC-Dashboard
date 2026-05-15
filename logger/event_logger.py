@@ -28,10 +28,10 @@ class EventLogger:
         self._fieldnames: list[str] = ["ts", "event", "data"]
 
     _PRED_FIELDS: list[str] = [
-        "session_ts", "date_utc", "ticker", "floor_strike",
+        "session_ts", "date_utc", "ticker",
         "btc_open", "btc_close", "btc_change", "resolution", "result_source",
-        "predicted_direction", "prediction_yes_pct", "pre_window_bias",
-        "prediction_correct",
+        "final_model_side", "predicted_direction", "prediction_yes_pct", "pre_window_bias",
+        "prediction_correct", "predicted_resolution", "resolution_pred_correct", "adx",
     ]
 
     # ── Public API ───────────────────────────────────────────────────────────

@@ -166,7 +166,6 @@ class StateManager:
             "confidence": 0.0,
             "signal_count": 0,
             "basis": [],
-            "edge_gate_blocked": False,
         }
 
         # Prediction accuracy (persisted across sessions)

@@ -165,12 +165,9 @@ def _compute_recommendation(
     tau_seconds: float = 0.0,
     min_commitment_rate: float = 0.20,
     min_gbm_market_gap_cents: float = 8.0,
-    min_entry_price_cents: float = 8.0,
-    max_entry_price_cents: float = 65.0,
     min_slope_usd_per_s: float = 0.30,
 ) -> dict:
     basis = []
-    edge_gate_blocked = False
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
@@ -356,23 +353,12 @@ def _compute_recommendation(
                     f"(gap {gap_val:+.1f}¢)"
                 )
 
-    # ── Hard gate: only block near-zero entries (model has no useful edge) ──────
-    if side is not None and entry_price is not None:
-        if entry_price < min_entry_price_cents:
-            basis.append(
-                f"⛔ Entry {entry_price:.1f}¢ below floor {min_entry_price_cents:.0f}¢ — poor risk/reward"
-            )
-            side = None
-            entry_price = None
-            edge_gate_blocked = True
-
     return {
         "side": side,
         "entry_price": round(entry_price, 1) if entry_price is not None else None,
         "confidence": round((2 + agree_count) / 7.0, 2) if side else 0.0,
         "signal_count": agree_count,
         "basis": basis,
-        "edge_gate_blocked": edge_gate_blocked,
     }
 
 class Analyzer:
@@ -503,8 +489,6 @@ class Analyzer:
             tau_seconds=tau_seconds,
             min_commitment_rate=self.cfg.min_commitment_rate,
             min_gbm_market_gap_cents=self.cfg.min_gbm_market_gap_cents,
-            min_entry_price_cents=self.cfg.min_entry_price_cents,
-            max_entry_price_cents=self.cfg.max_entry_price_cents,
             min_slope_usd_per_s=self.cfg.btc_slope_signal_threshold,
         )
 
@@ -549,8 +533,7 @@ class Analyzer:
                         f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
                     )
         elif current_side is None and locked is not None:
-            edge_blocked = self.state.recommendation.get("edge_gate_blocked", False)
-            if now_ts - lock_ts < 60.0 and not gbm_strongly_opposes and not edge_blocked:
+            if now_ts - lock_ts < 60.0 and not gbm_strongly_opposes:
                 self.state.recommendation["side"] = locked
                 self.state.recommendation["basis"].append(
                     f"⚠ Flip suppressed — locked {locked} for {now_ts - lock_ts:.0f}s"
@@ -645,7 +628,6 @@ class Analyzer:
                 ticker=contract,
                 btc_at_close=self.state.btc_price,
                 btc_open=self.state.btc_open,
-                predicted_dir=self.state.prediction_locked_direction,
                 prediction_yes_pct=self.state.prediction_locked_yes_pct,
                 pre_window_bias=self.state.pre_window_bias,
                 bias_at_discovery=self.state.bias_at_discovery,
@@ -659,7 +641,6 @@ class Analyzer:
         ticker: str,
         btc_at_close: float,
         btc_open: float,
-        predicted_dir: str,
         prediction_yes_pct: float,
         pre_window_bias: str,
         bias_at_discovery: str = "neutral",
