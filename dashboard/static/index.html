@@ -70,10 +70,26 @@ body {
 #rec-box {
   border-radius:var(--radius); border:2px solid var(--border);
   padding:16px 20px; background:var(--card);
-  transition:border-color .3s, background .3s;
+  transition:border-color .3s, background .3s, box-shadow .3s;
 }
 #rec-box.yes { border-color:var(--green); background:rgba(16,185,129,.05); }
 #rec-box.no  { border-color:var(--red);   background:rgba(239,68,68,.05); }
+#rec-box.extreme-locked {
+  box-shadow:0 0 18px rgba(16,185,129,.35);
+  animation:extreme-pulse 2.5s ease-in-out infinite;
+}
+@keyframes extreme-pulse {
+  0%,100% { box-shadow:0 0 8px rgba(16,185,129,.2); }
+  50%     { box-shadow:0 0 22px rgba(16,185,129,.55); }
+}
+
+/* ── GBM tier badge ── */
+.tier-badge { display:inline-block; padding:2px 10px; border-radius:10px; font-size:10px; font-weight:700; letter-spacing:1px; }
+.tier-extreme  { background:rgba(16,185,129,.15);  color:var(--green);  }
+.tier-strong   { background:rgba(16,185,129,.10);  color:var(--green);  }
+.tier-moderate { background:rgba(245,158,11,.15);  color:var(--yellow); }
+.tier-neutral  { background:rgba(100,116,139,.12); color:var(--muted);  }
+.metric-card.glow-extreme { border-color:var(--green); box-shadow:0 0 10px rgba(16,185,129,.25); }
 #rec-header  { font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:var(--muted); margin-bottom:10px; }
 #rec-action  { font-size:28px; font-weight:700; letter-spacing:1px; margin-bottom:8px; }
 #rec-action.yes { color:var(--green); }
@@ -142,10 +158,11 @@ body {
 
   <!-- Top metrics row -->
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px">
-    <div class="metric-card">
+    <div class="metric-card" id="m-fv-card">
       <div class="metric-label">GBM — YES prob</div>
       <div class="metric-value" id="m-fv">—</div>
       <div class="metric-sub" id="m-fv-dir">—</div>
+      <div id="m-fv-tier" class="tier-badge tier-neutral" style="margin-top:6px">—</div>
     </div>
     <div class="metric-card">
       <div class="metric-label">Model Accuracy (lifetime)</div>
@@ -260,6 +277,10 @@ body {
         <div id="rec-box">
           <div id="rec-header">Model Recommendation</div>
           <div id="rec-action" class="neutral">WAIT</div>
+          <div style="display:flex;align-items:center;gap:10px;margin:8px 0 10px">
+            <span id="rec-tier" class="tier-badge tier-neutral">NEUTRAL</span>
+            <span id="rec-lock-status" style="font-size:11px;color:var(--muted)">⏳ 8m decision pending…</span>
+          </div>
           <div id="rec-entry" style="color:var(--muted)">Gathering data…</div>
           <div id="rec-basis" style="margin-top:10px"></div>
           <div id="rec-phase-warn"></div>
@@ -494,6 +515,11 @@ function renderMetrics(s) {
   fvEl.style.color = fvColor;
   document.getElementById('m-fv-dir').textContent = dir;
 
+  const tier = gbmTier(yp);
+  applyTier('m-fv-tier', tier);
+  const fvCard = document.getElementById('m-fv-card');
+  if (fvCard) fvCard.classList.toggle('glow-extreme', tier.key === 'extreme');
+
   const ltAcc = s.lifetime_pred_accuracy || 0;
   const ltEl  = document.getElementById('m-accuracy');
   ltEl.textContent = s.lifetime_pred_total > 0 ? (ltAcc * 100).toFixed(1) + '%' : '—';
@@ -611,7 +637,11 @@ function renderRecommendation(s) {
     phaseBadge.style.color = 'var(--muted)';
   }
 
-  box.className = side === 'YES' ? 'yes' : side === 'NO' ? 'no' : '';
+  const yp   = s.prediction_yes_pct;
+  const tier = gbmTier(yp);
+  const isExtremeLocked = s.final_model_locked && tier.key === 'extreme' && !!side;
+  box.className = (side === 'YES' ? 'yes' : side === 'NO' ? 'no' : '') +
+                  (isExtremeLocked ? ' extreme-locked' : '');
 
   if (side === 'YES') {
     actEl.textContent = '▲  BUY YES'; actEl.className = 'yes';
@@ -619,6 +649,25 @@ function renderRecommendation(s) {
     actEl.textContent = '▼  BUY NO'; actEl.className = 'no';
   } else {
     actEl.textContent = '—  WAIT'; actEl.className = 'neutral';
+  }
+
+  // Confidence tier badge
+  applyTier('rec-tier', tier);
+
+  // 8-min lock status
+  const lockEl = document.getElementById('rec-lock-status');
+  if (lockEl) {
+    if (s.final_model_locked) {
+      const ls = s.final_model_side || 'NONE';
+      lockEl.textContent = '🔒 8m locked: ' + ls;
+      lockEl.style.color = ls === 'YES' ? 'var(--green)' : ls === 'NO' ? 'var(--red)' : 'var(--muted)';
+    } else if (s.active_contract) {
+      lockEl.textContent = '⏳ 8m decision pending…';
+      lockEl.style.color = 'var(--muted)';
+    } else {
+      lockEl.textContent = '—';
+      lockEl.style.color = 'var(--muted)';
+    }
   }
 
   if (side) {
@@ -777,6 +826,22 @@ function renderEventLog(s) {
     const body = line.slice(ts.length);
     return `<div>${ts} <span>${escHtml(body)}</span></div>`;
   }).join('');
+}
+
+// ── GBM confidence tier ─────────────────────────────────────────────────────
+function gbmTier(yp) {
+  if (yp == null) return { key:'neutral',   label:'—',        sublabel:'—',                        color:'var(--muted)' };
+  if (yp < 10 || yp > 90) return { key:'extreme',  label:'EXTREME',  sublabel:'100% hist. · buy & hold',  color:'var(--green)'  };
+  if (yp < 20 || yp > 80) return { key:'strong',   label:'STRONG',   sublabel:'high confidence',           color:'var(--green)'  };
+  if (yp < 35 || yp > 65) return { key:'moderate', label:'MODERATE', sublabel:'moderate confidence',       color:'var(--yellow)' };
+  return                          { key:'neutral',  label:'NEUTRAL',  sublabel:'model undecided — no edge', color:'var(--muted)'  };
+}
+
+function applyTier(badgeId, tier) {
+  const el = document.getElementById(badgeId);
+  if (!el) return;
+  el.textContent = tier.label;
+  el.className   = 'tier-badge tier-' + tier.key;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

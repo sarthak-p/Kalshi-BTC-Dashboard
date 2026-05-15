@@ -225,18 +225,34 @@ def _compute_recommendation(
         elif bias_side is None:
             basis.append("Technicals: neutral (GBM driving)")
     elif slope_side is not None:
-        side = slope_side
-        if bias_side is not None and bias_side != slope_side:
-            basis.append(f"Technicals: {bias} (conflicts with slope — informational)")
-        elif bias_side is None:
-            basis.append("Technicals: neutral (slope driving)")
+        # Slope may only drive when GBM has moved meaningfully in the same direction.
+        # "Same side of 50%" isn't enough — a 52% GBM is near-coin-flip territory.
+        # Require GBM > 60% for YES or < 40% for NO (≈ ¼ std-dev lean from midpoint).
+        gbm_confirms_slope = (slope_side == "YES" and fv > 60.0) or \
+                              (slope_side == "NO"  and fv < 40.0)
+        if gbm_confirms_slope:
+            side = slope_side
+            if bias_side is not None and bias_side != slope_side:
+                basis.append(f"Technicals: {bias} (conflicts with slope — informational)")
+            elif bias_side is None:
+                basis.append("Technicals: neutral (slope driving)")
+            else:
+                basis.append(f"Technicals: {bias} confirms slope")
         else:
-            basis.append(f"Technicals: {bias} confirms slope")
-    elif bias_side == "NO":
-        # bias=down is 73% accurate standalone — promote to trigger when GBM+slope neutral.
-        # bias=up is 50% (coin flip) so it is never promoted here.
+            side = None
+            basis.append(
+                f"Slope: {slope_side} suppressed — GBM {fv:.0f}% too close to 50% (no entry)"
+            )
+    elif bias_side == "NO" and fv < 40.0:
+        # bias=down may only fire when GBM also leans clearly NO (< 40%).
+        # Near-50% GBM means the market is undecided; bias alone isn't worth the trade.
         side = "NO"
-        basis.append("Technicals: bearish (bias driving — GBM+slope neutral)")
+        basis.append("Technicals: bearish (bias driving — GBM+slope neutral, GBM < 40%)")
+    elif bias_side == "NO":
+        side = None
+        basis.append(
+            f"Technicals: bearish — suppressed (GBM {fv:.0f}% ≥ 40%, insufficient lean)"
+        )
     else:
         side = None
         if bias_side is not None:
@@ -549,6 +565,15 @@ class Analyzer:
                 "basis": self.state.recommendation["basis"],
             })
 
+        # Lock the model's final decision at the 8-min mark (first entry_open tick).
+        # Taken after flip suppression so we freeze the stabilised signal, not mid-flip noise.
+        if phase == "entry_open" and not self.state.final_model_locked:
+            self.state.lock_final_model_decision(self.state.recommendation["side"])
+            await self.state.log_event(
+                f"🔒 Model decision locked at ~8m: {self.state.final_model_side or 'NONE'} "
+                f"(GBM {fv:.0f}%)"
+            )
+
         if self.executor:
             await self.executor.maybe_trade()
 
@@ -626,6 +651,7 @@ class Analyzer:
                 bias_at_discovery=self.state.bias_at_discovery,
                 predicted_resolution=self.state.predicted_resolution,
                 tech_adx=self.state.tech_adx,
+                final_model_side=self.state.final_model_side,
             ))
 
     async def _settle_window(
@@ -639,6 +665,7 @@ class Analyzer:
         bias_at_discovery: str = "neutral",
         predicted_resolution: str = "NEUTRAL",
         tech_adx: float = 0.0,
+        final_model_side: Optional[str] = None,
     ) -> None:
         """
         Poll Kalshi's settlement API for the official result.
@@ -675,9 +702,16 @@ class Analyzer:
         btc_chg = btc_at_close - btc_open if btc_open > 0 else 0.0
         chg_sign = "+" if btc_chg >= 0 else ""
 
+        # Correctness is judged on the 8-min locked recommendation, not the raw GBM direction.
+        effective_dir = (
+            "UP" if final_model_side == "YES"
+            else "DOWN" if final_model_side == "NO"
+            else "NEUTRAL"
+        )
+
         prediction_correct: Optional[bool] = None
-        if resolved_yes is not None and predicted_dir != "NEUTRAL":
-            prediction_correct = (predicted_dir == "UP") == resolved_yes
+        if resolved_yes is not None and effective_dir != "NEUTRAL":
+            prediction_correct = (effective_dir == "UP") == resolved_yes
 
         resolution_pred_correct: Optional[bool] = None
         if resolved_yes is not None and predicted_resolution != "NEUTRAL":
@@ -685,7 +719,7 @@ class Analyzer:
 
         pred_label = ""
         if prediction_correct is not None:
-            pred_label = f"  model={predicted_dir} [{'CORRECT' if prediction_correct else 'WRONG'}]"
+            pred_label = f"  model={final_model_side} [{'CORRECT' if prediction_correct else 'WRONG'}]"
         if resolution_pred_correct is not None:
             pred_label += f"  slope={'CORRECT' if resolution_pred_correct else 'WRONG'}"
 
@@ -703,7 +737,8 @@ class Analyzer:
             "btc_change": round(btc_chg, 2),
             "resolution": resolution,
             "result_source": result_source,
-            "predicted_direction": predicted_dir,
+            "final_model_side": final_model_side,
+            "predicted_direction": effective_dir,
             "prediction_yes_pct": round(prediction_yes_pct, 1),
             "pre_window_bias": pre_window_bias,
             "prediction_correct": prediction_correct,
@@ -739,7 +774,8 @@ class Analyzer:
             "btc_change":              round(btc_chg, 2),
             "resolution":              resolution,
             "result_source":           result_source,
-            "predicted_direction":     predicted_dir,
+            "final_model_side":        final_model_side or "",
+            "predicted_direction":     effective_dir,
             "prediction_yes_pct":      round(prediction_yes_pct, 1),
             "pre_window_bias":         pre_window_bias,
             "prediction_correct":      prediction_correct,

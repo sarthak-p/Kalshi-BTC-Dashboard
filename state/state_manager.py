@@ -130,6 +130,11 @@ class StateManager:
         self.prediction_locked_yes_pct: float = 50.0
         self.prediction_locked: bool = False
 
+        # Final model decision locked at 8-min mark (first entry_open tick, after flip suppression)
+        # This is what the executor acts on and what determines model correctness in logs.
+        self.final_model_side: Optional[str] = None   # "YES" | "NO" | None
+        self.final_model_locked: bool = False
+
         # External market data
         self.dvol: float = 0.0                   # Deribit DVOL index (annualized %)
         self.futures_basis_pct: float = 0.0      # (futures − spot) / spot × 100
@@ -273,6 +278,8 @@ class StateManager:
             self.prediction_locked_direction = "NEUTRAL"
             self.prediction_locked_yes_pct = 50.0
             self.prediction_locked = False
+            self.final_model_side = None
+            self.final_model_locked = False
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
@@ -397,6 +404,13 @@ class StateManager:
         self.prediction_locked_yes_pct = self.prediction_yes_pct
         self.prediction_locked = True
 
+    def lock_final_model_decision(self, side: Optional[str]) -> None:
+        """Lock the model's 8-min recommendation — called once per window on the first entry_open tick."""
+        if self.final_model_locked:
+            return
+        self.final_model_side = side
+        self.final_model_locked = True
+
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
             self.open_interest = oi
@@ -508,6 +522,8 @@ class StateManager:
             "predicted_resolution": self.predicted_resolution,
             "prediction_locked_direction": self.prediction_locked_direction,
             "prediction_locked": self.prediction_locked,
+            "final_model_side": self.final_model_side,
+            "final_model_locked": self.final_model_locked,
             # External market data
             "dvol": self.dvol,
             "futures_basis_pct": self.futures_basis_pct,

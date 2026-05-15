@@ -11,7 +11,6 @@ then enter the new side — works correctly in both paper and live mode.
 from __future__ import annotations
 
 import asyncio
-import time
 
 import httpx
 
@@ -29,7 +28,6 @@ class Executor:
         self.cfg    = cfg
         self.logger = logger
         self._attempted_contract: str | None = None  # prevents retry spam on failed orders
-        self._rec_side_since: tuple[str | None, float] = (None, 0.0)  # (side, timestamp) for stability gate
 
     async def startup(self) -> None:
         """Call once at boot. In live mode, seeds executor_bankroll from Kalshi."""
@@ -70,29 +68,23 @@ class Executor:
             self.state._dirty.set()
 
     async def maybe_trade(self) -> None:
-        """Follow the model recommendation panel (GBM-primary, slope fallback)."""
+        """Follow the model's 8-min locked decision (final_model_side)."""
         contract = self.state.active_contract
         if not contract:
             self._attempted_contract = None  # reset for next window
-            self._rec_side_since = (None, 0.0)
             return
 
         # Don't retry a failed order in the same window — wait for the next contract
         if contract == self._attempted_contract:
             return
 
-        target_side = self.state.recommendation.get("side")
-        if not target_side:
-            self._rec_side_since = (None, time.time())
+        # Only act once the model has locked its decision at the 8-min mark
+        if not self.state.final_model_locked:
             return
 
-        # Track how long the current recommendation side has been stable
-        last_side, since_ts = self._rec_side_since
-        if target_side != last_side:
-            self._rec_side_since = (target_side, time.time())
-            return  # just flipped — start the 60s stability clock
-        if time.time() - since_ts < 60.0:
-            return  # signal hasn't held long enough yet
+        target_side = self.state.final_model_side
+        if not target_side:
+            return
 
         # Require meaningful GBM edge over the market price (8¢ minimum gap)
         fv  = self.state.prediction_yes_pct
