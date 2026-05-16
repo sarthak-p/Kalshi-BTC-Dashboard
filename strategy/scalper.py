@@ -562,7 +562,7 @@ class Analyzer:
         # measuring a stale suppressed side as "stable" and locking a position the model
         # had already abandoned.
         if phase == "entry_open" and not self.state.final_model_locked:
-            if raw_side != self._stable_side:
+            if raw_side is not None and raw_side != self._stable_side:
                 self._stable_side = raw_side
                 self._stable_since = now
             elif raw_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
