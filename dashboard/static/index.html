@@ -816,10 +816,9 @@ function renderAccuracy(s) {
   if (resolutions.length) {
     document.getElementById('resolution-log').innerHTML = resolutions.slice(0, 15).map(line => {
       const body      = line.replace(/^\[[\d:]+\]\s*/, '').replace('Window closed: ', '');
-      const isCorrect = body.includes('CORRECT');
-      const isWrong   = body.includes('WRONG');
-      const hasModel  = body.includes('model=') || body.includes('slope=');
-      const color     = isCorrect ? 'var(--green)' : isWrong ? 'var(--red)' : 'var(--muted)';
+      const modelWrong   = /model=\S+ \[WRONG\]/.test(body);
+      const modelCorrect = /model=\S+ \[CORRECT\]/.test(body);
+      const color = modelWrong ? 'var(--red)' : modelCorrect ? 'var(--green)' : 'var(--muted)';
       return `<div style="color:${color}">${escHtml(body)}</div>`;
     }).join('');
   }
