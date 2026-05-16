@@ -8,11 +8,6 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# ── Trading mode ─────────────────────────────────────────────────────────────
-# Change TRADING_MODE in .env to switch between paper and live.
-# paper = simulated fills, no real orders placed
-# live  = real orders via Kalshi REST API — uses real money
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -93,8 +88,6 @@ class Settings(BaseSettings):
     # Remove or set to 0 after restarting to resume normal persistence.
     paper_bankroll_reset: float = Field(default=0.0, env="PAPER_BANKROLL_RESET")
 
-    # ── Executor ─────────────────────────────────────────────────────────────
-    trading_mode: Literal["paper", "live"] = Field(default="paper", env="TRADING_MODE")
 
     def model_post_init(self, __context) -> None:
         host = "demo-api.kalshi.com" if self.kalshi_env == "demo" else "api.elections.kalshi.com"

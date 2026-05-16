@@ -25,18 +25,16 @@ async def main() -> None:
     state   = StateManager(
         momentum_threshold_usd=settings.momentum_threshold_usd,
         starting_bankroll=settings.bankroll,
-        trading_mode=settings.trading_mode,
     )
     app.state.state_manager = state
 
     kalshi_feed = KalshiFeed(state=state, cfg=settings, logger=logger)
     btc_feed    = BtcFeed(state=state, cfg=settings, logger=logger)
-    executor    = Executor(state=state, cfg=settings, logger=logger)
+    executor    = Executor(state=state, cfg=settings)
     analyzer    = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
 
     await state.log_event(
         f"Dashboard started — env={settings.kalshi_env}  "
-        f"mode={settings.trading_mode.upper()}  "
         f"momentum=${settings.momentum_entry_usd:.0f}  "
         f"bankroll=${state.executor_bankroll:.2f}"
     )

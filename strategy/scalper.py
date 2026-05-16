@@ -171,11 +171,11 @@ def _compute_recommendation(
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value (YES requires >70% — data shows UP calls are weaker than DOWN)
-    if fv > 70:
+    # GBM fair-value — 62/38 (symmetric: 12 points each side of neutral)
+    if fv > 62:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 35:
+    elif fv < 38:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
@@ -223,10 +223,10 @@ def _compute_recommendation(
             basis.append("Technicals: neutral (GBM driving)")
     elif slope_side is not None:
         # Slope may only drive when GBM has moved meaningfully in the same direction.
-        # "Same side of 50%" isn't enough — a 52% GBM is near-coin-flip territory.
-        # Require GBM > 60% for YES or < 40% for NO (≈ ¼ std-dev lean from midpoint).
-        gbm_confirms_slope = (slope_side == "YES" and fv > 60.0) or \
-                              (slope_side == "NO"  and fv < 40.0)
+        # YES: fv > 57 (primary fires at 62, so slope covers the 57–62 window)
+        # NO:  fv < 43 (primary fires at 38, so slope covers the 38–43 window)
+        gbm_confirms_slope = (slope_side == "YES" and fv > 57.0) or \
+                              (slope_side == "NO"  and fv < 43.0)
         if gbm_confirms_slope:
             side = slope_side
             if bias_side is not None and bias_side != slope_side:
@@ -240,15 +240,15 @@ def _compute_recommendation(
             basis.append(
                 f"Slope: {slope_side} suppressed — GBM {fv:.0f}% too close to 50% (no entry)"
             )
-    elif bias_side == "NO" and fv < 40.0:
-        # bias=down may only fire when GBM also leans clearly NO (< 40%).
+    elif bias_side == "NO" and fv < 43.0:
+        # bias=down may only fire when GBM also leans clearly NO (< 43%).
         # Near-50% GBM means the market is undecided; bias alone isn't worth the trade.
         side = "NO"
-        basis.append("Technicals: bearish (bias driving — GBM+slope neutral, GBM < 40%)")
+        basis.append("Technicals: bearish (bias driving — GBM+slope neutral, GBM < 43%)")
     elif bias_side == "NO":
         side = None
         basis.append(
-            f"Technicals: bearish — suppressed (GBM {fv:.0f}% ≥ 40%, insufficient lean)"
+            f"Technicals: bearish — suppressed (GBM {fv:.0f}% ≥ 43%, insufficient lean)"
         )
     else:
         side = None
@@ -470,6 +470,7 @@ class Analyzer:
         # Write analysis conditions (direct write — sole writer)
         self.state.analysis.update({
             "phase": phase,
+            "fv": round(fv, 1),
             "side": side,
             "btc_move_ok": abs(btc_change) >= self.cfg.momentum_entry_usd,
             "price_in_range": price_in_range,
@@ -654,7 +655,6 @@ class Analyzer:
                 btc_open=self.state.btc_open,
                 prediction_yes_pct=self.state.prediction_locked_yes_pct,
                 pre_window_bias=self.state.pre_window_bias,
-                bias_at_discovery=self.state.bias_at_discovery,
                 predicted_resolution=self.state.predicted_resolution,
                 tech_adx=self.state.tech_adx,
                 final_model_side=self.state.final_model_side,
@@ -667,7 +667,6 @@ class Analyzer:
         btc_open: float,
         prediction_yes_pct: float,
         pre_window_bias: str,
-        bias_at_discovery: str = "neutral",
         predicted_resolution: str = "NEUTRAL",
         tech_adx: float = 0.0,
         final_model_side: Optional[str] = None,
@@ -701,8 +700,6 @@ class Analyzer:
         # Settle any open executor position for this window, then re-sync balance
         if resolution in ("YES", "NO"):
             await self.state.settle_position(ticker, resolution)
-            if self.executor:
-                await self.executor.sync_balance()
 
         btc_chg = btc_at_close - btc_open if btc_open > 0 else 0.0
         chg_sign = "+" if btc_chg >= 0 else ""
@@ -751,23 +748,6 @@ class Analyzer:
             "resolution_pred_correct": resolution_pred_correct,
             "adx": round(tech_adx, 1),
         })
-
-        # ── Technicals discovery-time log ─────────────────────────────────────────
-        if resolution in ("YES", "NO"):
-            import csv as _csv, os as _os
-            _path = _os.path.join("logs", "technicals_discovery.csv")
-            _write_header = not _os.path.exists(_path)
-            with open(_path, "a", newline="") as _f:
-                _w = _csv.writer(_f)
-                if _write_header:
-                    _w.writerow(["date_utc", "ticker", "bias_at_discovery", "resolution"])
-                import datetime as _dt
-                _w.writerow([
-                    _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                    ticker,
-                    bias_at_discovery,
-                    resolution,
-                ])
 
         # ── CSV log ───────────────────────────────────────────────────────────────
         self.logger.log_prediction({
