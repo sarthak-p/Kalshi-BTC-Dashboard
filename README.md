@@ -46,7 +46,7 @@ First signal that fires wins:
 
 ### Position sizing
 
-Flat **$100 per trade**, every window. At 40¢ entry that's ~250 contracts; at 60¢ entry ~166 contracts.
+Flat **$10 per trade**, every window. At 40¢ entry that's ~25 contracts; at 60¢ entry ~16 contracts.
 
 ---
 
@@ -166,7 +166,7 @@ main.py
       _bias_refresher()             RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
       _window_resolver()            settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_trade()                 enter based on locked model recommendation (Martingale sizing)
+      maybe_trade()                 enter based on locked model recommendation (flat $10/trade)
   → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
 ```
 
@@ -254,5 +254,5 @@ KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CO
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but only fires a recommendation when GBM or slope thresholds are met.
 - **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows.
-- **Unified strategy.** The executor follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 70% → YES) with slope as a fallback. The executor places a trade for every recommendation the model locks at the 8-minute mark, with no additional price-range or edge-gap filters.
-- **Position sizing.** Flat $100 per trade (~250 contracts at 40¢). Sizing does not vary by confidence or prior result.
+- **Unified strategy.** The executor follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 70% → YES) with slope as a fallback. The executor places a trade for every recommendation the model locks at the 8-minute mark, subject to the 15¢ gap re-validation at execution time.
+- **Position sizing.** Flat $10 per trade (~25 contracts at 40¢). Sizing does not vary by confidence or prior result.
