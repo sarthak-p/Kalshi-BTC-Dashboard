@@ -21,7 +21,7 @@ Kalshi settles using CF Benchmarks' BRTI (averaged over the 60 seconds before cl
 
 First signal that fires wins:
 
-1. **GBM fair value** — if GBM < 35% → NO; if GBM > 70% → YES
+1. **GBM fair value** — if GBM < 35% → NO; if GBM > 65% → YES
 2. **BTC slope** — if GBM neutral and |slope| > 0.30 $/s and GBM confirms (> 60% for YES, < 40% for NO) → slope drives
 3. **Technical bias=down** — if GBM+slope both neutral and GBM < 40% → NO
 4. **No signal** → no trade
@@ -32,7 +32,7 @@ First signal that fires wins:
 
 - **Lock**: at the **7:30 mark** (`entry_open` phase), the model begins waiting to lock. Two conditions must both hold:
   1. The raw signal has held the **same side for 30 continuous seconds** — filters single-tick spikes
-  2. GBM is past the threshold (> 62% YES or < 38% NO)
+  2. GBM is past the threshold (> 65% YES or < 35% NO)
 
 - **Circuit breaker**: after the lock, if GBM reverses significantly (locked NO but GBM recovers above 55%, or locked YES but GBM drops below 45%), the trade is skipped. Catches intracandle wicks where BTC moves sharply then recovers before the order fires.
 
@@ -81,7 +81,7 @@ The bias is locked at window discovery and does not update mid-window.
 
 | Signal | Source | Role |
 |--------|--------|------|
-| **GBM fair value** | Live BTC + DVOL | Primary — drives when GBM < 35% (NO) or > 70% (YES) |
+| **GBM fair value** | Live BTC + DVOL | Primary — drives when GBM < 35% (NO) or > 65% (YES) |
 | **BTC slope** | Coinbase spot price history | Secondary — drives when GBM neutral and \|slope\| > 0.30 $/s |
 | **Technical bias=down** | Coinbase 1-min candles | Tertiary — standalone NO trigger when GBM+slope neutral and GBM < 43% |
 | **Technical bias=up** | Coinbase 1-min candles | Informational only |

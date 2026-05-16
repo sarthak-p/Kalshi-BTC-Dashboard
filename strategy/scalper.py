@@ -171,8 +171,8 @@ def _compute_recommendation(
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value — 70/35 (asymmetric: YES bar higher to account for faster Kalshi repricing on upside)
-    if fv > 70:
+    # GBM fair-value — 65/35 (asymmetric: YES bar higher to account for faster Kalshi repricing on upside)
+    if fv > 65:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
     elif fv < 35:
