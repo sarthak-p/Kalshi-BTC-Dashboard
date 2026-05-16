@@ -527,11 +527,12 @@ class Analyzer:
             self.state._last_locked_contract = self.state.active_contract
             locked = None
 
-        # Break the 60-second flip lock early when GBM crosses the stop-loss threshold —
-        # same ≤35%/≥65% boundary used by the executor so display and execution stay aligned.
+        # Break the 60-second flip lock early when GBM crosses the stop-loss threshold.
+        # NO lock: unlock at 60% — BTC has fully recovered, BRTI noise dominates beyond here.
+        # YES lock: unlock at 40% — symmetric.
         gbm_strongly_opposes = (
-            (locked == "YES" and fv <= 35.0) or
-            (locked == "NO"  and fv >= 70.0)
+            (locked == "YES" and fv <= 40.0) or
+            (locked == "NO"  and fv >= 60.0)
         )
 
         if current_side is not None:
