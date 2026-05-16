@@ -30,7 +30,7 @@ First signal that fires wins:
 
 ### Trade lifecycle
 
-- **Lock**: at the **8-minute mark** (`entry_open` phase), the model begins waiting to lock. Two conditions must both hold:
+- **Lock**: at the **7:30 mark** (`entry_open` phase), the model begins waiting to lock. Two conditions must both hold:
   1. The raw signal has held the **same side for 30 continuous seconds** — filters single-tick spikes
   2. GBM is past the threshold (> 62% YES or < 38% NO)
 
@@ -177,7 +177,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MIN_GBM_MARKET_GAP_CENTS` | `10.0` | Dashboard display only — informational gap warning, does not block execution |
 | `MIN_ENTRY_PRICE_CENTS` | `8.0` | Dashboard display only — does not block execution |
 | `MAX_ENTRY_PRICE_CENTS` | `65.0` | Dashboard display only — does not block execution |
-| `MAX_ENTRY_WINDOW_S` | `420.0` | Entry window opens when seconds remaining crosses this (7-min mark) |
+| `MAX_ENTRY_WINDOW_S` | `450.0` | Entry window opens when seconds remaining crosses this (7:30 mark) |
 | `MIN_ENTRY_WINDOW_S` | `120.0` | Too-late threshold — entry window closes below this (2-min mark) |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
 | `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |

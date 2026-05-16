@@ -376,6 +376,7 @@ class Analyzer:
         self.executor = executor
         self._stable_side: Optional[str] = None
         self._stable_since: float = 0.0
+        self._slope_suppressed_logged: bool = False
 
     async def run(self) -> None:
         await asyncio.gather(
@@ -418,6 +419,7 @@ class Analyzer:
             phase = "monitoring"
             self._stable_side = None
             self._stable_since = 0.0
+            self._slope_suppressed_logged = False
         elif tau_seconds >= self.cfg.min_entry_window_s:
             phase = "entry_open"
             self.state.lock_entry_prediction()   # freeze on first entry_open tick
@@ -570,6 +572,7 @@ class Analyzer:
             if raw_side is not None and raw_side != self._stable_side:
                 self._stable_side = raw_side
                 self._stable_since = now
+                self._slope_suppressed_logged = False
             elif raw_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
                 yes_bid_p = ob.best_bid() or 0.0
                 yes_ask_p = ob.best_ask() or 0.0
@@ -586,9 +589,11 @@ class Analyzer:
                 slope_aligns = (raw_side == "YES" and slope >= 0.05) or \
                                (raw_side == "NO"  and slope <= -0.05)
                 if not slope_aligns:
-                    await self.state.log_event(
-                        f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (not confirming direction)"
-                    )
+                    if not self._slope_suppressed_logged:
+                        self._slope_suppressed_logged = True
+                        await self.state.log_event(
+                            f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (waiting for alignment)"
+                        )
                 else:
                     self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
                     held = now - self._stable_since
