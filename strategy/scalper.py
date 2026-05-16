@@ -362,11 +362,15 @@ def _compute_recommendation(
     }
 
 class Analyzer:
+    _LOCK_STABILITY_SECS = 30.0  # signal must hold the same side this long before locking
+
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state
         self.cfg      = cfg
         self.logger   = logger
         self.executor = executor
+        self._stable_side: Optional[str] = None
+        self._stable_since: float = 0.0
 
     async def run(self) -> None:
         await asyncio.gather(
@@ -407,6 +411,8 @@ class Analyzer:
         # Phase
         if tau_seconds > self.cfg.max_entry_window_s:
             phase = "monitoring"
+            self._stable_side = None
+            self._stable_since = 0.0
         elif tau_seconds >= self.cfg.min_entry_window_s:
             phase = "entry_open"
             self.state.lock_entry_prediction()   # freeze on first entry_open tick
@@ -548,14 +554,24 @@ class Analyzer:
                 "basis": self.state.recommendation["basis"],
             })
 
-        # Lock the model's final decision at the 8-min mark (first entry_open tick).
-        # Taken after flip suppression so we freeze the stabilised signal, not mid-flip noise.
+        # Lock the model's final decision once the signal has held the same side for
+        # _LOCK_STABILITY_SECS continuously inside the entry_open window.
         if phase == "entry_open" and not self.state.final_model_locked:
-            self.state.lock_final_model_decision(self.state.recommendation["side"])
-            await self.state.log_event(
-                f"🔒 Model decision locked at ~8m: {self.state.final_model_side or 'NONE'} "
-                f"(GBM {fv:.0f}%)"
-            )
+            current_side = self.state.recommendation["side"]
+            if current_side != self._stable_side:
+                self._stable_side = current_side
+                self._stable_since = now
+            elif current_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
+                yes_bid_p = ob.best_bid() or 0.0
+                yes_ask_p = ob.best_ask() or 0.0
+                kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
+                gap = abs(fv - kalshi_mid) if kalshi_mid is not None else 999.0
+                if gap >= self.cfg.min_gbm_market_gap_cents:
+                    self.state.lock_final_model_decision(current_side)
+                    held = now - self._stable_since
+                    await self.state.log_event(
+                        f"🔒 Model locked: {current_side} held {held:.0f}s  GBM {fv:.0f}%  gap {gap:.1f}¢"
+                    )
 
         if self.executor:
             await self.executor.maybe_trade()

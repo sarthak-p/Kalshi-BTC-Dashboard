@@ -114,16 +114,7 @@ class Executor:
         if in_contract and pos["side"] != target_side:
             await self._close_position(contract, pos)
 
-        prev = self.state.position
-        if prev["status"] == "lost" and prev["ticker"] != contract:
-            unit_size = _UNIT_SIZE_USD * 3.0
-            await self.state.log_event(
-                f"📈 Martingale: last round lost — sizing ${unit_size:.0f} this window"
-            )
-        else:
-            unit_size = _UNIT_SIZE_USD
-
-        n_contracts = max(1, int(unit_size / (price / 100.0)))
+        n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
 
         if self.cfg.trading_mode == "paper":
             await self._paper_fill(contract, target_side, n_contracts, price)

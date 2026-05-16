@@ -439,6 +439,10 @@ class StateManager:
             self.executor_bankroll     = round(self.executor_bankroll + pnl, 2)
             self.executor_session_pnl  = round(self.executor_session_pnl + pnl, 2)
             self._save_executor_bankroll()
+            # Clear the lock so maybe_trade can't fire a second buy after settlement
+            self.final_model_locked   = False
+            self.final_model_side     = None
+            self.final_model_contract = None
         self._dirty.set()
 
     async def stop_position(self, ticker: str, sell_price: float) -> None:

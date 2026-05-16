@@ -11,7 +11,7 @@ from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
 RECONNECT_BASE = 1.0
-RECONNECT_MAX = 60.0
+RECONNECT_MAX = 5.0
 
 
 class BtcFeed:

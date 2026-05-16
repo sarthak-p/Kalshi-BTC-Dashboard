@@ -32,7 +32,7 @@ from logger.event_logger import EventLogger
 from state.state_manager import Orderbook, StateManager
 
 RECONNECT_BASE = 1.0
-RECONNECT_MAX = 60.0
+RECONNECT_MAX = 5.0
 WINDOW_SECONDS = 900  # 15 min
 ROLLOVER_RETRY_S = 5.0   # poll interval while waiting for the next window
 ROLLOVER_LOG_S = 30.0    # how often to log the "waiting" message

@@ -34,16 +34,19 @@ First signal that fires wins:
 
 ### Trade lifecycle
 
-- **Entry**: at the **8-minute mark** (`entry_open` phase), the model locks its recommendation. The lock retries every analysis tick until a non-None recommendation appears — so brief warm-up or flip-suppression delays won't silently prevent a trade. The executor places one trade per window based on the locked decision. Orders submit at ask+20¢ (buys) or bid−20¢ (sells) so they cross the spread immediately.
+- **Entry**: at the **8-minute mark** (`entry_open` phase), the model begins waiting to lock its recommendation. Three conditions must all hold before the lock fires:
+  1. The signal (GBM or slope) has held the **same side for 30 continuous seconds** — filters single-tick spikes
+  2. GBM is past the threshold (> 70% YES or < 35% NO)
+  3. GBM differs from the Kalshi market mid by at least **15¢** — ensures the market hasn't already priced in the edge
+
+  If the gap to market is too small (market has caught up to the model), the bot waits or skips the window entirely. The executor places one trade per window based on the locked decision.
 - **Hold**: position sits untouched until window close
 - **Settlement**: at window close the position is marked won/lost based on the official Kalshi result
 - **Unfilled order guard**: if a buy or sell order is confirmed resting (not filled) after 3 seconds, it is cancelled on Kalshi and the position state rolls back — prevents holding two real positions with one in local state
 
-### Position sizing — Martingale
+### Position sizing
 
-Base unit is **$100 per trade**. After a losing window, the next trade sizes up to **$300** (3×). As soon as a trade wins, sizing reverts to $100. This means a single win always recovers the previous loss plus a profit at base size.
-
-At 40¢ entry, $100 buys ~250 contracts; at 60¢ entry ~166 contracts.
+Flat **$100 per trade**, every window. At 40¢ entry that's ~250 contracts; at 60¢ entry ~166 contracts.
 
 ---
 
@@ -98,7 +101,7 @@ The bias is locked at window discovery and does not update mid-window. This prev
 
 **GBM confidence gate**: technicals are suppressed entirely when GBM is below 20% or above 80% — at those extremes, BTC is so far from the strike that a general RSI/BB bounce signal is irrelevant.
 
-The executor places a trade whenever the model produces a recommendation — there is no separate price-range or edge-gap gate blocking execution.
+The executor only trades when all three lock conditions are met: signal stability (30s), GBM threshold (>70% or <35%), and a minimum 15¢ gap between GBM and the Kalshi market mid. Windows where the market has already priced in what the model sees are skipped.
 
 ---
 
@@ -198,7 +201,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (0.30 $/s ≈ $18/min) |
 | `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
-| `MIN_GBM_MARKET_GAP_CENTS` | `8.0` | Warning threshold: GBM vs Kalshi mid gap (shown as ⚠ in basis, does not block) |
+| `MIN_GBM_MARKET_GAP_CENTS` | `15.0` | Minimum gap between GBM fair value and Kalshi market mid (¢) required to lock a trade — prevents entering when the market has already priced in the edge |
 | `MIN_ENTRY_PRICE_CENTS` | `8.0` | Used in dashboard phase indicator — does not block execution |
 | `MAX_ENTRY_PRICE_CENTS` | `65.0` | Used in dashboard phase indicator — does not block execution |
 | `MAX_ENTRY_WINDOW_S` | `420.0` | Entry window opens when seconds remaining crosses this (8-min mark) |
@@ -252,4 +255,4 @@ KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CO
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual trades placed. They diverge because the model predicts every window but only fires a recommendation when GBM or slope thresholds are met.
 - **Technicals edge.** The `technicals_discovery.csv` file accumulates discovery-time bias readings vs resolutions. Meaningful accuracy assessment requires 30–50 directional rows.
 - **Unified strategy.** The executor follows the recommendation panel directly — both use GBM-primary (< 35% → NO, > 70% → YES) with slope as a fallback. The executor places a trade for every recommendation the model locks at the 8-minute mark, with no additional price-range or edge-gap filters.
-- **Position sizing.** $100 base per trade (~250 contracts at 40¢). Martingale: triples to $300 after a loss, reverts to $100 after a win.
+- **Position sizing.** Flat $100 per trade (~250 contracts at 40¢). Sizing does not vary by confidence or prior result.
