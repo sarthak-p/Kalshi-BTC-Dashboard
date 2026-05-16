@@ -8,7 +8,7 @@ from __future__ import annotations
 from config import Settings
 from state.state_manager import StateManager
 
-_UNIT_SIZE_USD = 10.0  # fixed dollars risked per trade
+_UNIT_SIZE_USD = 100.0  # fixed dollars risked per trade
 
 
 class Executor:
