@@ -19,7 +19,7 @@ from feeds.kalshi_ws import _make_rest_headers
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
-_UNIT_SIZE_USD = 100.0  # fixed dollars risked per trade
+_UNIT_SIZE_USD = 10.0  # fixed dollars risked per trade
 
 
 class Executor:
