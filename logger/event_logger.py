@@ -31,6 +31,7 @@ class EventLogger:
         "btc_open", "btc_close", "btc_change", "resolution", "result_source",
         "final_model_side", "predicted_direction", "prediction_yes_pct", "pre_window_bias",
         "prediction_correct", "predicted_resolution", "resolution_pred_correct", "adx",
+        "signal_side", "signal_fv", "signal_market_mid", "signal_gap", "market_mid_at_close",
     ]
 
     # ── Public API ───────────────────────────────────────────────────────────

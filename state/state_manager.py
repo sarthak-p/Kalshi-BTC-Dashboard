@@ -190,6 +190,9 @@ class StateManager:
         self.final_model_fv: float = 50.0             # GBM fair value (cents) at the moment of lock
         self.final_model_gap: float = 0.0             # GBM–market gap (cents) at the moment of lock
 
+        # First stability hit during entry_open (regardless of gap outcome) — for edge tracking
+        self.signal_snapshot: dict = {}
+
         # External market data
         self.dvol: float = 0.0                   # Deribit DVOL index (annualized %)
         self.futures_basis_pct: float = 0.0      # (futures − spot) / spot × 100
@@ -339,6 +342,7 @@ class StateManager:
             self.final_model_contract = None
             self.final_model_fv = 50.0
             self.final_model_gap = 0.0
+            self.signal_snapshot = {}
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:

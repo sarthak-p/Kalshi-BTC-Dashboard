@@ -73,18 +73,6 @@ class Executor:
                 )
                 return
 
-        # Skip if edge has compressed since the lock.
-        locked_fv = self.state.final_model_fv
-        mid = (ob.best_bid() + ob.best_ask()) / 2.0 if ob.best_bid() and ob.best_ask() else None
-        if mid is not None:
-            edge = (locked_fv - mid) if target_side == "YES" else (mid - locked_fv)
-            if edge < self.cfg.min_gbm_market_gap_cents:
-                self._attempted_contract = contract
-                await self.state.log_event(
-                    f"⏭ Skipped {target_side} — edge {edge:+.1f}¢ (need {self.cfg.min_gbm_market_gap_cents:.0f}¢)"
-                )
-                return
-
         n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
         await self._paper_fill(contract, target_side, n_contracts, price)
 

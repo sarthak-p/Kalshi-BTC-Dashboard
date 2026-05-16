@@ -347,7 +347,12 @@ def _compute_recommendation(
         if mid_price is not None:
             gap = fv - mid_price
             gap_val = gap if side == "YES" else -gap
-            if gap_val < min_gbm_market_gap_cents:
+            if gap_val < 0:
+                basis.append(
+                    f"⚠ No edge — market over-priced {side}: GBM {fv:.0f}¢ vs market {mid_price:.0f}¢ "
+                    f"(gap {gap_val:+.1f}¢, negative EV)"
+                )
+            elif gap_val < min_gbm_market_gap_cents:
                 basis.append(
                     f"⚠ Small edge: GBM {fv:.0f}¢ vs market {mid_price:.0f}¢ "
                     f"(gap {gap_val:+.1f}¢)"
@@ -569,18 +574,19 @@ class Analyzer:
                 yes_bid_p = ob.best_bid() or 0.0
                 yes_ask_p = ob.best_ask() or 0.0
                 kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
-                # Directional gap: positive only when market is under-pricing our side.
-                # YES: model > market mid (market under-prices YES)
-                # NO:  market mid > model (market over-prices YES, making NO cheap)
-                # abs() would let a lock fire when the market has moved past the model
-                # in the wrong direction — the executor would immediately skip it.
-                gap = ((fv - kalshi_mid) if raw_side == "YES" else (kalshi_mid - fv)) if kalshi_mid is not None else 999.0
-                if gap >= self.cfg.min_gbm_market_gap_cents:
-                    self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap)
-                    held = now - self._stable_since
-                    await self.state.log_event(
-                        f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  gap {gap:.1f}¢"
-                    )
+                gap = ((fv - kalshi_mid) if raw_side == "YES" else (kalshi_mid - fv)) if kalshi_mid is not None else None
+                if not self.state.signal_snapshot:
+                    self.state.signal_snapshot = {
+                        "side": raw_side,
+                        "fv": round(fv, 1),
+                        "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
+                        "gap": round(gap, 1) if gap is not None else None,
+                    }
+                self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
+                held = now - self._stable_since
+                await self.state.log_event(
+                    f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%"
+                )
 
         if self.executor:
             await self.executor.maybe_trade()
@@ -658,6 +664,8 @@ class Analyzer:
                 predicted_resolution=self.state.predicted_resolution,
                 tech_adx=self.state.tech_adx,
                 final_model_side=self.state.final_model_side,
+                signal_snapshot=dict(self.state.signal_snapshot),
+                market_mid_at_close=self.state.orderbook.mid(),
             ))
 
     async def _settle_window(
@@ -670,6 +678,8 @@ class Analyzer:
         predicted_resolution: str = "NEUTRAL",
         tech_adx: float = 0.0,
         final_model_side: Optional[str] = None,
+        signal_snapshot: dict = None,
+        market_mid_at_close: Optional[float] = None,
     ) -> None:
         """
         Poll Kalshi's settlement API for the official result.
@@ -750,6 +760,7 @@ class Analyzer:
         })
 
         # ── CSV log ───────────────────────────────────────────────────────────────
+        snap = signal_snapshot or {}
         self.logger.log_prediction({
             "session_ts":              int(self.state.session_start_ts),
             "date_utc":                datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
@@ -767,6 +778,11 @@ class Analyzer:
             "predicted_resolution":    predicted_resolution,
             "resolution_pred_correct": resolution_pred_correct,
             "adx":                     round(tech_adx, 1),
+            "signal_side":             snap.get("side", ""),
+            "signal_fv":               snap.get("fv", ""),
+            "signal_market_mid":       snap.get("market_mid", ""),
+            "signal_gap":              snap.get("gap", ""),
+            "market_mid_at_close":     round(market_mid_at_close, 1) if market_mid_at_close is not None else "",
         })
 
         # ── Accuracy tracking ─────────────────────────────────────────────────────

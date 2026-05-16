@@ -30,14 +30,12 @@ First signal that fires wins:
 
 ### Trade lifecycle
 
-- **Lock**: at the **8-minute mark** (`entry_open` phase), the model begins waiting to lock. Three conditions must all hold:
+- **Lock**: at the **8-minute mark** (`entry_open` phase), the model begins waiting to lock. Two conditions must both hold:
   1. The raw signal has held the **same side for 30 continuous seconds** — filters single-tick spikes
   2. GBM is past the threshold (> 62% YES or < 38% NO)
-  3. GBM differs from the Kalshi market mid by at least **10¢** — ensures the market hasn't already priced in the edge
 
 - **Circuit breaker**: after the lock, if GBM reverses significantly (locked NO but GBM recovers above 55%, or locked YES but GBM drops below 45%), the trade is skipped. Catches intracandle wicks where BTC moves sharply then recovers before the order fires.
 
-- **Edge re-validation**: the 8¢ gap is checked again at execution time. If the market has repriced since the lock, the trade is skipped — no retry within the same window.
 
 - **Fill**: simulated at the current best ask (YES) or `100 − best bid` (NO) at the moment of execution.
 
@@ -45,7 +43,7 @@ First signal that fires wins:
 
 ### Position sizing
 
-Flat **$10 per trade**, every window. At 40¢ entry that's ~25 contracts; at 60¢ entry ~16 contracts.
+Flat **$100 per trade**, every window. At 40¢ entry that's ~250 contracts; at 60¢ entry ~166 contracts.
 
 ---
 
@@ -176,7 +174,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike shown as "bullish/bearish" in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (0.30 $/s ≈ $18/min) |
 | `MIN_COMMITMENT_RATE` | `0.08` | Warning threshold: `\|BTC move\| / tau` in $/s (shown as ⚠, does not block) |
-| `MIN_GBM_MARKET_GAP_CENTS` | `10.0` | Minimum gap between GBM fair value and Kalshi market mid (¢) to lock a trade |
+| `MIN_GBM_MARKET_GAP_CENTS` | `10.0` | Dashboard display only — informational gap warning, does not block execution |
 | `MIN_ENTRY_PRICE_CENTS` | `8.0` | Dashboard display only — does not block execution |
 | `MAX_ENTRY_PRICE_CENTS` | `65.0` | Dashboard display only — does not block execution |
 | `MAX_ENTRY_WINDOW_S` | `420.0` | Entry window opens when seconds remaining crosses this (7-min mark) |
@@ -225,4 +223,4 @@ KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CO
 - **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
 - **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual paper trades placed. They diverge because the model predicts every window but only fires a trade when lock conditions are met.
-- **Position sizing.** Flat $10 per trade (~25 contracts at 40¢). Sizing does not vary by confidence or prior result.
+- **Position sizing.** Flat $100 per trade (~250 contracts at 40¢). Sizing does not vary by confidence or prior result.
