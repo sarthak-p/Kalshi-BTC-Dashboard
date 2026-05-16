@@ -568,9 +568,14 @@ class Analyzer:
                 yes_bid_p = ob.best_bid() or 0.0
                 yes_ask_p = ob.best_ask() or 0.0
                 kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
-                gap = abs(fv - kalshi_mid) if kalshi_mid is not None else 999.0
+                # Directional gap: positive only when market is under-pricing our side.
+                # YES: model > market mid (market under-prices YES)
+                # NO:  market mid > model (market over-prices YES, making NO cheap)
+                # abs() would let a lock fire when the market has moved past the model
+                # in the wrong direction — the executor would immediately skip it.
+                gap = ((fv - kalshi_mid) if raw_side == "YES" else (kalshi_mid - fv)) if kalshi_mid is not None else 999.0
                 if gap >= self.cfg.min_gbm_market_gap_cents:
-                    self.state.lock_final_model_decision(raw_side, fv=fv)
+                    self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap)
                     held = now - self._stable_since
                     await self.state.log_event(
                         f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  gap {gap:.1f}¢"
