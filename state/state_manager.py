@@ -106,7 +106,6 @@ class Orderbook:
     yes_asks: dict = field(default_factory=dict)
     top_yes_bid: Optional[float] = None
     top_yes_ask: Optional[float] = None
-    last_seq: int = 0
     last_update: float = 0.0
 
     def best_bid(self) -> Optional[float]:
@@ -252,7 +251,6 @@ class StateManager:
         self.executor_bankroll_original: float = starting_bankroll   # set by loader below
         self.executor_all_time_trades: int = 0                       # set by loader below
         self.executor_bankroll: float = self._load_executor_bankroll(default=starting_bankroll)
-        self.executor_bankroll_initial: float = self.executor_bankroll  # frozen at session start
         self.executor_session_pnl: float = 0.0
         self.executor_session_trades: int = 0
 
@@ -641,8 +639,7 @@ class StateManager:
             # Executor position + P&L
             "trading_mode":              self.trading_mode,
             "position":                  dict(self.position),
-            "executor_bankroll":         round(self.executor_bankroll, 2),
-            "executor_bankroll_initial": round(self.executor_bankroll_initial, 2),
+            "executor_bankroll":          round(self.executor_bankroll, 2),
             "executor_bankroll_original": round(self.executor_bankroll_original, 2),
             "executor_session_pnl":      round(self.executor_session_pnl, 2),
             "executor_session_trades":   self.executor_session_trades,

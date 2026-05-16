@@ -440,14 +440,8 @@ function renderExecutor(s) {
   if (!posEl) return;
   const status   = pos.status || 'none';
   const modeIcon = pos.mode === 'live' ? '🟢' : '📄';
-  const plo      = s.pending_limit_order;
 
-  if (status === 'none' && plo) {
-    const elapsed = plo.posted_at ? Math.round(Date.now() / 1000 - plo.posted_at) : 0;
-    posEl.textContent = '📋 LIMIT ' + plo.side + '  ' + plo.contracts + 'x @ ' + (plo.limit_price || 0).toFixed(1) + '¢';
-    posEl.style.color = plo.side === 'YES' ? 'var(--green)' : 'var(--red)';
-    posSubEl.textContent = 'waiting for fill · ' + elapsed + 's · fv was ' + (plo.fv_at_post || 0).toFixed(0) + '¢';
-  } else if (status === 'none') {
+  if (status === 'none') {
     posEl.textContent = '—';
     posEl.style.color = 'var(--muted)';
     posSubEl.textContent = 'no position this window';
