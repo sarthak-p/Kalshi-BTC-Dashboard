@@ -21,9 +21,9 @@ Kalshi settles using CF Benchmarks' BRTI (averaged over the 60 seconds before cl
 
 First signal that fires wins:
 
-1. **GBM fair value** — if GBM < 38% → NO; if GBM > 62% → YES
-2. **BTC slope** — if GBM neutral and |slope| > 0.30 $/s and GBM confirms (> 57% for YES, < 43% for NO) → slope drives
-3. **Technical bias=down** — if GBM+slope both neutral and GBM < 43% → NO
+1. **GBM fair value** — if GBM < 35% → NO; if GBM > 70% → YES
+2. **BTC slope** — if GBM neutral and |slope| > 0.30 $/s and GBM confirms (> 60% for YES, < 40% for NO) → slope drives
+3. **Technical bias=down** — if GBM+slope both neutral and GBM < 40% → NO
 4. **No signal** → no trade
 
 `bias=up` is **not** a standalone trigger — 50% accuracy in live data. Shown in the dashboard as informational only.
@@ -81,7 +81,7 @@ The bias is locked at window discovery and does not update mid-window.
 
 | Signal | Source | Role |
 |--------|--------|------|
-| **GBM fair value** | Live BTC + DVOL | Primary — drives when GBM < 38% (NO) or > 62% (YES) |
+| **GBM fair value** | Live BTC + DVOL | Primary — drives when GBM < 35% (NO) or > 70% (YES) |
 | **BTC slope** | Coinbase spot price history | Secondary — drives when GBM neutral and \|slope\| > 0.30 $/s |
 | **Technical bias=down** | Coinbase 1-min candles | Tertiary — standalone NO trigger when GBM+slope neutral and GBM < 43% |
 | **Technical bias=up** | Coinbase 1-min candles | Informational only |

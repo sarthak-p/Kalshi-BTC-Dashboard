@@ -171,11 +171,11 @@ def _compute_recommendation(
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value — 62/38 (symmetric: 12 points each side of neutral)
-    if fv > 62:
+    # GBM fair-value — 70/35 (asymmetric: YES bar higher to account for faster Kalshi repricing on upside)
+    if fv > 70:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 38:
+    elif fv < 35:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
@@ -223,10 +223,10 @@ def _compute_recommendation(
             basis.append("Technicals: neutral (GBM driving)")
     elif slope_side is not None:
         # Slope may only drive when GBM has moved meaningfully in the same direction.
-        # YES: fv > 57 (primary fires at 62, so slope covers the 57–62 window)
-        # NO:  fv < 43 (primary fires at 38, so slope covers the 38–43 window)
-        gbm_confirms_slope = (slope_side == "YES" and fv > 57.0) or \
-                              (slope_side == "NO"  and fv < 43.0)
+        # YES: fv > 60 (primary fires at 70, so slope covers the 60–70 window)
+        # NO:  fv < 40 (primary fires at 35, so slope covers the 35–40 window)
+        gbm_confirms_slope = (slope_side == "YES" and fv > 60.0) or \
+                              (slope_side == "NO"  and fv < 40.0)
         if gbm_confirms_slope:
             side = slope_side
             if bias_side is not None and bias_side != slope_side:
@@ -240,15 +240,15 @@ def _compute_recommendation(
             basis.append(
                 f"Slope: {slope_side} suppressed — GBM {fv:.0f}% too close to 50% (no entry)"
             )
-    elif bias_side == "NO" and fv < 43.0:
-        # bias=down may only fire when GBM also leans clearly NO (< 43%).
+    elif bias_side == "NO" and fv < 40.0:
+        # bias=down may only fire when GBM also leans clearly NO (< 40%).
         # Near-50% GBM means the market is undecided; bias alone isn't worth the trade.
         side = "NO"
-        basis.append("Technicals: bearish (bias driving — GBM+slope neutral, GBM < 43%)")
+        basis.append("Technicals: bearish (bias driving — GBM+slope neutral, GBM < 40%)")
     elif bias_side == "NO":
         side = None
         basis.append(
-            f"Technicals: bearish — suppressed (GBM {fv:.0f}% ≥ 43%, insufficient lean)"
+            f"Technicals: bearish — suppressed (GBM {fv:.0f}% ≥ 40%, insufficient lean)"
         )
     else:
         side = None
@@ -582,11 +582,19 @@ class Analyzer:
                         "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
                         "gap": round(gap, 1) if gap is not None else None,
                     }
-                self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
-                held = now - self._stable_since
-                await self.state.log_event(
-                    f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%"
-                )
+                # Slope must confirm lock direction — flat/opposing slope indicates a wick recovery
+                slope_aligns = (raw_side == "YES" and slope >= 0.05) or \
+                               (raw_side == "NO"  and slope <= -0.05)
+                if not slope_aligns:
+                    await self.state.log_event(
+                        f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (not confirming direction)"
+                    )
+                else:
+                    self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
+                    held = now - self._stable_since
+                    await self.state.log_event(
+                        f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  slope={slope:+.2f}/s"
+                    )
 
         if self.executor:
             await self.executor.maybe_trade()
