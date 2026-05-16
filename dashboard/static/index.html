@@ -686,7 +686,7 @@ function renderRecommendation(s) {
   if (lockEl) {
     if (s.final_model_locked) {
       const ls = s.final_model_side || 'NONE';
-      lockEl.textContent = '🔒 8m locked: ' + ls;
+      lockEl.textContent = '🔒 Decision locked: ' + ls;
       lockEl.style.color = ls === 'YES' ? 'var(--green)' : ls === 'NO' ? 'var(--red)' : 'var(--muted)';
     } else if (s.active_contract) {
       lockEl.textContent = '⏳ Decision pending…';
