@@ -35,11 +35,11 @@ First signal that fires wins:
 ### Trade lifecycle
 
 - **Entry**: at the **8-minute mark** (`entry_open` phase), the model begins waiting to lock its recommendation. Three conditions must all hold before the lock fires:
-  1. The signal (GBM or slope) has held the **same side for 30 continuous seconds** — filters single-tick spikes
+  1. The **raw signal** (GBM or slope, before flip suppression) has held the **same side for 30 continuous seconds** — filters single-tick spikes. The stability clock watches the pre-suppression signal so flip suppression cannot hold a stale side stable and trigger a false lock.
   2. GBM is past the threshold (> 70% YES or < 35% NO)
   3. GBM differs from the Kalshi market mid by at least **15¢** — ensures the market hasn't already priced in the edge
 
-  If the gap to market is too small (market has caught up to the model), the bot waits or skips the window entirely. The executor places one trade per window based on the locked decision.
+  Once locked, the executor re-validates the edge immediately before placing the order using the GBM stored at lock time. If the gap has compressed below 15¢ by execution time (market repriced in the seconds since lock), the trade is skipped and the window is marked attempted — no retry within the same window.
 - **Hold**: position sits untouched until window close
 - **Settlement**: at window close the position is marked won/lost based on the official Kalshi result
 - **Unfilled order guard**: if a buy or sell order is confirmed resting (not filled) after 3 seconds, it is cancelled on Kalshi and the position state rolls back — prevents holding two real positions with one in local state
@@ -101,7 +101,7 @@ The bias is locked at window discovery and does not update mid-window. This prev
 
 **GBM confidence gate**: technicals are suppressed entirely when GBM is below 20% or above 80% — at those extremes, BTC is so far from the strike that a general RSI/BB bounce signal is irrelevant.
 
-The executor only trades when all three lock conditions are met: signal stability (30s), GBM threshold (>70% or <35%), and a minimum 15¢ gap between GBM and the Kalshi market mid. Windows where the market has already priced in what the model sees are skipped.
+The executor only trades when all three lock conditions are met: signal stability (30s), GBM threshold (>70% or <35%), and a minimum 15¢ gap between GBM and the Kalshi market mid. The gap is checked twice: once at lock time (prevents locking when market has already priced in the edge) and once at execution time (prevents filling if the market reprices in the seconds between lock and order placement).
 
 ---
 

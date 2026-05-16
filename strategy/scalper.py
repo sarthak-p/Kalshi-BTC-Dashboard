@@ -511,6 +511,7 @@ class Analyzer:
         locked = getattr(self.state, 'recommendation_locked_side', None)
         lock_ts = getattr(self.state, 'recommendation_lock_ts', 0.0)
         current_side = self.state.recommendation["side"]
+        raw_side = current_side  # snapshot before suppression may overwrite
 
         if self.state.active_contract != getattr(self.state, '_last_locked_contract', None):
             self.state.recommendation_locked_side = None
@@ -554,23 +555,25 @@ class Analyzer:
                 "basis": self.state.recommendation["basis"],
             })
 
-        # Lock the model's final decision once the signal has held the same side for
+        # Lock the model's final decision once the raw signal has held the same side for
         # _LOCK_STABILITY_SECS continuously inside the entry_open window.
+        # Uses raw_side (pre-suppression) so flip suppression cannot fool the timer into
+        # measuring a stale suppressed side as "stable" and locking a position the model
+        # had already abandoned.
         if phase == "entry_open" and not self.state.final_model_locked:
-            current_side = self.state.recommendation["side"]
-            if current_side != self._stable_side:
-                self._stable_side = current_side
+            if raw_side != self._stable_side:
+                self._stable_side = raw_side
                 self._stable_since = now
-            elif current_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
+            elif raw_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
                 yes_bid_p = ob.best_bid() or 0.0
                 yes_ask_p = ob.best_ask() or 0.0
                 kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
                 gap = abs(fv - kalshi_mid) if kalshi_mid is not None else 999.0
                 if gap >= self.cfg.min_gbm_market_gap_cents:
-                    self.state.lock_final_model_decision(current_side)
+                    self.state.lock_final_model_decision(raw_side, fv=fv)
                     held = now - self._stable_since
                     await self.state.log_event(
-                        f"🔒 Model locked: {current_side} held {held:.0f}s  GBM {fv:.0f}%  gap {gap:.1f}¢"
+                        f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  gap {gap:.1f}¢"
                     )
 
         if self.executor:

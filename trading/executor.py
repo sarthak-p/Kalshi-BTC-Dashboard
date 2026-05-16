@@ -112,6 +112,21 @@ class Executor:
         if in_contract and pos["side"] != target_side:
             await self._close_position(contract, pos)
 
+        # Re-validate edge at execution — gap may have compressed since the model locked.
+        # Uses the GBM stored at lock time so we're measuring against the same reference
+        # that justified the trade, not a drifting live value.
+        locked_fv = self.state.final_model_fv
+        mid = (ob.best_bid() + ob.best_ask()) / 2.0 if ob.best_bid() and ob.best_ask() else None
+        if mid is not None:
+            edge = (locked_fv - mid) if target_side == "YES" else (mid - locked_fv)
+            if edge < self.cfg.min_gbm_market_gap_cents:
+                self._attempted_contract = contract
+                await self.state.log_event(
+                    f"⏭ Skipped {target_side} — edge gone: GBM {locked_fv:.0f}¢ vs market {mid:.0f}¢ "
+                    f"(edge {edge:+.1f}¢, need {self.cfg.min_gbm_market_gap_cents:.0f}¢)"
+                )
+                return
+
         n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
 
         if self.cfg.trading_mode == "paper":

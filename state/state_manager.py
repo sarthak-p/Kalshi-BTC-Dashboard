@@ -189,6 +189,7 @@ class StateManager:
         self.final_model_side: Optional[str] = None   # "YES" | "NO" | None
         self.final_model_locked: bool = False
         self.final_model_contract: Optional[str] = None  # contract the lock was set for
+        self.final_model_fv: float = 50.0             # GBM fair value (cents) at the moment of lock
 
         # External market data
         self.dvol: float = 0.0                   # Deribit DVOL index (annualized %)
@@ -477,7 +478,7 @@ class StateManager:
         self.prediction_locked_yes_pct = self.prediction_yes_pct
         self.prediction_locked = True
 
-    def lock_final_model_decision(self, side: Optional[str]) -> None:
+    def lock_final_model_decision(self, side: Optional[str], fv: float = 50.0) -> None:
         """Lock the model's 8-min recommendation — retries each entry_open tick until side is non-None."""
         if self.final_model_locked:
             return
@@ -486,6 +487,7 @@ class StateManager:
         self.final_model_side = side
         self.final_model_locked = True
         self.final_model_contract = self.active_contract
+        self.final_model_fv = fv
 
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
