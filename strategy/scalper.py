@@ -166,6 +166,12 @@ def _compute_recommendation(
     min_commitment_rate: float = 0.20,
     min_gbm_market_gap_cents: float = 8.0,
     min_slope_usd_per_s: float = 0.30,
+    futures_taker_ratio: float = 0.0,
+    futures_taker_ratio_high: float = 1.15,
+    futures_taker_ratio_low: float = 0.85,
+    binance_depth_smoothed_val: float = 0.0,
+    depth_imbalance_threshold: float = 0.15,
+    liq_pressure_val: Optional[str] = None,
 ) -> dict:
     basis = []
 
@@ -323,8 +329,42 @@ def _compute_recommendation(
             else:
                 basis.append(f"Kalshi mid: flat ({slope:+.3f}¢/s)")
 
+    # Futures taker buy/sell ratio (informational)
+    if futures_taker_ratio > 0:
+        if futures_taker_ratio >= futures_taker_ratio_high:
+            taker_side = "YES"
+            basis.append(f"Taker ratio: {futures_taker_ratio:.3f} (long-heavy)")
+        elif futures_taker_ratio <= futures_taker_ratio_low:
+            taker_side = "NO"
+            basis.append(f"Taker ratio: {futures_taker_ratio:.3f} (short-heavy)")
+        else:
+            taker_side = None
+            basis.append(f"Taker ratio: {futures_taker_ratio:.3f} (neutral)")
+    else:
+        taker_side = None
+
+    # Binance spot orderbook depth imbalance (informational)
+    if abs(binance_depth_smoothed_val) >= depth_imbalance_threshold:
+        depth_side = "YES" if binance_depth_smoothed_val > 0 else "NO"
+        direction = "bid-heavy" if binance_depth_smoothed_val > 0 else "ask-heavy"
+        basis.append(f"Depth: {binance_depth_smoothed_val:+.3f} ({direction})")
+    else:
+        depth_side = None
+        basis.append(f"Depth: {binance_depth_smoothed_val:+.3f} (neutral)")
+
+    # Liquidation pressure (informational)
+    if liq_pressure_val == "long_squeeze":
+        liq_side: Optional[str] = "NO"
+        basis.append("Liq: long squeeze active ⚠")
+    elif liq_pressure_val == "short_squeeze":
+        liq_side = "YES"
+        basis.append("Liq: short squeeze active ⚠")
+    else:
+        liq_side = None
+
     # Count supporting signals that agree with the recommended side (informational)
-    supporting = [btc_side, cvd_side, funding_side, imbalance_side, kalshi_momentum_side, slope_side]
+    supporting = [btc_side, cvd_side, funding_side, imbalance_side, kalshi_momentum_side, slope_side,
+                  taker_side, depth_side, liq_side]
     if side is not None:
         agree_count = sum(1 for s in supporting if s == side)
         disagree_count = sum(1 for s in supporting if s is not None and s != side)
@@ -504,6 +544,12 @@ class Analyzer:
             min_commitment_rate=self.cfg.min_commitment_rate,
             min_gbm_market_gap_cents=self.cfg.min_gbm_market_gap_cents,
             min_slope_usd_per_s=self.cfg.btc_slope_signal_threshold,
+            futures_taker_ratio=self.state.futures_taker_ratio,
+            futures_taker_ratio_high=self.cfg.futures_taker_ratio_high,
+            futures_taker_ratio_low=self.cfg.futures_taker_ratio_low,
+            binance_depth_smoothed_val=self.state.binance_depth_smoothed(),
+            depth_imbalance_threshold=self.cfg.binance_depth_imbalance_threshold,
+            liq_pressure_val=self.state.liq_pressure(),
         )
 
         if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
@@ -574,6 +620,10 @@ class Analyzer:
                 self._stable_side = raw_side
                 self._stable_since = now
                 self._slope_suppressed_logged = False
+            elif raw_side is None:
+                # Signal went neutral — reset stability timer so YES→neutral→YES doesn't accumulate time
+                self._stable_side = None
+                self._stable_since = 0.0
             elif raw_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
                 yes_bid_p = ob.best_bid() or 0.0
                 yes_ask_p = ob.best_ask() or 0.0
@@ -595,12 +645,55 @@ class Analyzer:
                         await self.state.log_event(
                             f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (waiting for alignment)"
                         )
-                else:
-                    self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
-                    held = now - self._stable_since
+                elif abs(fv - 50.0) < 12.0:
                     await self.state.log_event(
-                        f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  slope={slope:+.2f}/s"
+                        f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<12)"
                     )
+                else:
+                    _oi_d   = self.state.oi_delta_pct(300.0)
+                    _liq_p  = self.state.liq_pressure()
+                    _taker  = self.state.futures_taker_ratio
+                    _depth_s = self.state.binance_depth_smoothed()
+                    _skip = None
+                    if _oi_d is not None and _oi_d < self.cfg.oi_squeeze_threshold_pct and raw_side == "YES":
+                        _skip = (f"OI squeeze {_oi_d:.1f}% < "
+                                 f"{self.cfg.oi_squeeze_threshold_pct:.1f}% (YES blocked)")
+                    elif (_oi_d is not None and _oi_d > -self.cfg.oi_squeeze_threshold_pct
+                          and raw_side == "NO"):
+                        _skip = (f"OI expanding {_oi_d:.1f}% > "
+                                 f"{-self.cfg.oi_squeeze_threshold_pct:.1f}% (NO blocked)")
+                    elif _liq_p == "long_squeeze" and raw_side == "YES":
+                        _skip = (f"long squeeze active — "
+                                 f"liq_long_2m=${self.state.liq_long_2m:.0f} (YES blocked)")
+                    elif _liq_p == "short_squeeze" and raw_side == "NO":
+                        _skip = (f"short squeeze active — "
+                                 f"liq_short_2m=${self.state.liq_short_2m:.0f} (NO blocked)")
+                    elif (_taker > 0.0
+                          and _taker < self.cfg.futures_taker_ratio_low
+                          and raw_side == "YES"):
+                        _skip = (f"taker ratio {_taker:.3f} < "
+                                 f"{self.cfg.futures_taker_ratio_low:.2f} (short-heavy, YES blocked)")
+                    elif (_taker > 0.0
+                          and _taker > self.cfg.futures_taker_ratio_high
+                          and raw_side == "NO"):
+                        _skip = (f"taker ratio {_taker:.3f} > "
+                                 f"{self.cfg.futures_taker_ratio_high:.2f} (long-heavy, NO blocked)")
+                    elif (_depth_s < -self.cfg.binance_depth_imbalance_threshold
+                          and raw_side == "YES"):
+                        _skip = (f"depth imbalance {_depth_s:+.3f} < "
+                                 f"-{self.cfg.binance_depth_imbalance_threshold:.2f} (ask-heavy, YES blocked)")
+                    elif (_depth_s > self.cfg.binance_depth_imbalance_threshold
+                          and raw_side == "NO"):
+                        _skip = (f"depth imbalance {_depth_s:+.3f} > "
+                                 f"+{self.cfg.binance_depth_imbalance_threshold:.2f} (bid-heavy, NO blocked)")
+                    if _skip:
+                        await self.state.log_event(f"⛔ Lock vetoed: {_skip}")
+                    else:
+                        self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
+                        held = now - self._stable_since
+                        await self.state.log_event(
+                            f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  slope={slope:+.2f}/s"
+                        )
 
         if self.executor:
             await self.executor.maybe_trade()

@@ -12,7 +12,10 @@ import uvicorn
 
 from config import settings
 from dashboard.app import app
+from feeds.binance_depth_feed import BinanceDepthFeed
+from feeds.binance_liq_feed import BinanceLiqFeed
 from feeds.btc_feed import BtcFeed
+from feeds.futures_taker_feed import FuturesTakerFeed
 from feeds.kalshi_ws import KalshiFeed
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
@@ -28,10 +31,13 @@ async def main() -> None:
     )
     app.state.state_manager = state
 
-    kalshi_feed = KalshiFeed(state=state, cfg=settings, logger=logger)
-    btc_feed    = BtcFeed(state=state, cfg=settings, logger=logger)
-    executor    = Executor(state=state, cfg=settings)
-    analyzer    = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
+    kalshi_feed   = KalshiFeed(state=state, cfg=settings, logger=logger)
+    btc_feed      = BtcFeed(state=state, cfg=settings, logger=logger)
+    taker_feed    = FuturesTakerFeed(state=state, cfg=settings)
+    depth_feed    = BinanceDepthFeed(state=state, cfg=settings)
+    liq_feed      = BinanceLiqFeed(state=state, cfg=settings)
+    executor      = Executor(state=state, cfg=settings)
+    analyzer      = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
 
     await state.log_event(
         f"Dashboard started — env={settings.kalshi_env}  "
@@ -70,6 +76,9 @@ async def main() -> None:
         state.broadcast_loop(),
         kalshi_feed.run(),
         btc_feed.run(),
+        taker_feed.run(),
+        depth_feed.run(),
+        liq_feed.run(),
         analyzer.run(),
         uv_server.serve(),
     )

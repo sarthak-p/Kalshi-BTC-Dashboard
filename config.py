@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     # Standard: < 15 = no trend, 15–25 = weak trend, > 25 = strong trend
     min_adx_threshold: float = Field(default=15.0, env="MIN_ADX_THRESHOLD")
 
+    # ── New feeds ─────────────────────────────────────────────────────────────
+    futures_taker_ratio_high: float = Field(default=1.15, env="FUTURES_TAKER_RATIO_HIGH")
+    futures_taker_ratio_low: float = Field(default=0.85, env="FUTURES_TAKER_RATIO_LOW")
+    oi_squeeze_threshold_pct: float = Field(default=-1.5, env="OI_SQUEEZE_THRESHOLD_PCT")
+    binance_depth_imbalance_threshold: float = Field(default=0.15, env="BINANCE_DEPTH_IMBALANCE_THRESHOLD")
+    liq_veto_threshold_usd: float = Field(default=500000.0, env="LIQ_VETO_THRESHOLD_USD")
+
     # ── Dashboard ────────────────────────────────────────────────────────────
     dashboard_host: str = Field(default="127.0.0.1", env="DASHBOARD_HOST")
     dashboard_port: int = Field(default=8000, env="DASHBOARD_PORT")

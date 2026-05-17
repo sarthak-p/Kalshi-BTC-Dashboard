@@ -31,11 +31,23 @@ First signal that fires wins:
 ### Trade lifecycle
 
 - **Lock**: at the **7:30 mark** (`entry_open` phase), the model begins waiting to lock. Two conditions must both hold:
-  1. The raw signal has held the **same side for 30 continuous seconds** — filters single-tick spikes
+  1. The raw signal has held the **same side for 30 continuous seconds** — filters single-tick spikes. The timer resets to zero if the signal goes neutral, so a YES → neutral → YES pattern does not accumulate continuous time.
   2. GBM is past the threshold (> 65% YES or < 35% NO)
 
-- **Circuit breaker**: after the lock, if GBM reverses significantly (locked NO but GBM recovers above 55%, or locked YES but GBM drops below 45%), the trade is skipped. Catches intracandle wicks where BTC moves sharply then recovers before the order fires.
+- **Pre-lock gates** (checked in order, any failure skips the lock and logs the reason):
 
+  | Gate | Condition | Blocks |
+  |------|-----------|--------|
+  | Slope alignment | slope < 0.05 $/s for YES, or > −0.05 $/s for NO | Both |
+  | GBM conviction | \|GBM − 50\| < 12 → model has no opinion | Both |
+  | OI squeeze | OI 5-min delta < −1.5% | YES |
+  | OI expansion | OI 5-min delta > +1.5% | NO |
+  | Long squeeze | liq_long_2m > $500K | YES |
+  | Short squeeze | liq_short_2m > $500K | NO |
+  | Taker ratio (short-heavy) | taker ratio < 0.85 (feed must be live) | YES |
+  | Taker ratio (long-heavy) | taker ratio > 1.15 (feed must be live) | NO |
+  | Depth imbalance (ask-heavy) | smoothed depth < −0.15 | YES |
+  | Depth imbalance (bid-heavy) | smoothed depth > +0.15 | NO |
 
 - **Fill**: simulated at the current best ask (YES) or `100 − best bid` (NO) at the moment of execution.
 
@@ -90,6 +102,27 @@ The bias is locked at window discovery and does not update mid-window.
 | Funding rate | OKX perp | Informational |
 | Orderbook imbalance | Kalshi order book | Informational |
 | Kalshi mid momentum | Kalshi mid price history | Informational |
+| **Taker ratio** | Binance Futures aggTrade stream | Informational + lock veto when strongly opposing |
+| **Depth imbalance** | Binance Futures depth20 stream | Informational + lock veto when strongly opposing |
+| **Liquidation pressure** | Binance Futures forceOrder stream | Informational + hard lock veto |
+
+---
+
+## Live data feeds
+
+| Feed | Source | Update rate | Purpose |
+|------|--------|-------------|---------|
+| BTC price + CVD | Coinbase Advanced Trade WS | Tick | GBM input, CVD signal |
+| Kalshi orderbook | Kalshi WS | Tick | Entry price, OB imbalance |
+| DVOL | Deribit REST | Every 15 s | GBM vol input |
+| Funding rate | OKX REST | Every 15 s | Informational signal |
+| **Taker ratio** | `fstream.binance.com/ws/btcusdt@aggTrade` | Real-time (1-s state update) | 5-min rolling buy/sell ratio; lock veto |
+| **Depth imbalance** | `fstream.binance.com/ws/btcusdt@depth20@100ms` | 100 ms | Top-10 bid/ask quantity imbalance; lock veto |
+| **Liquidations** | `fstream.binance.com/ws/btcusdt@forceOrder` | Tick | 2-min rolling long/short liq USD; hard lock veto |
+
+All Binance feeds use `fstream.binance.com` (futures streaming endpoint), which is accessible from the US. `fapi.binance.com` (REST) and `stream.binance.com` (spot WS) are geo-blocked in the US.
+
+The taker ratio is computed locally from the aggTrade stream as a rolling 5-minute `takerBuyVol / takerSellVol` (matching Binance's REST definition). State is updated once per second.
 
 ---
 
@@ -131,17 +164,20 @@ Dashboard: `http://127.0.0.1:8000`
 
 ```
 main.py
-  → EventLogger.flush_loop()        async CSV flush every 5 s
-  → StateManager.broadcast_loop()   WebSocket push to dashboard on every state change
-  → KalshiFeed.run()                REST contract discovery + WebSocket orderbook
-  → BtcFeed.run()                   Coinbase BTC-USD price (ticker) + CVD (trade stream)
+  → EventLogger.flush_loop()          async CSV flush every 5 s
+  → StateManager.broadcast_loop()     WebSocket push to dashboard on every state change
+  → KalshiFeed.run()                  REST contract discovery + WebSocket orderbook
+  → BtcFeed.run()                     Coinbase BTC-USD price (ticker) + CVD (trade stream)
+  → FuturesTakerFeed.run()            Binance Futures aggTrade → rolling 5-min taker ratio
+  → BinanceDepthFeed.run()            Binance Futures depth20@100ms → bid/ask imbalance
+  → BinanceLiqFeed.run()              Binance Futures forceOrder → 2-min rolling liquidations
   → Analyzer.run()
-      _analysis_loop()              GBM fair value + recommendation (every 50 ms)
-      _bias_refresher()             RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
-      _window_resolver()            settlement + accuracy tracking (every 1 s)
+      _analysis_loop()                GBM fair value + recommendation (every 50 ms)
+      _bias_refresher()               RSI/BB (between windows only) + DVOL + OKX basis/funding (every 15 s)
+      _window_resolver()              settlement + accuracy tracking (every 1 s)
   → Executor
-      maybe_trade()                 paper fill based on locked model recommendation (flat $10/trade)
-  → FastAPI/Uvicorn                 dashboard HTTP + WebSocket server
+      maybe_trade()                   paper fill based on locked model recommendation
+  → FastAPI/Uvicorn                   dashboard HTTP + WebSocket server
 ```
 
 All components share a single `StateManager` in-memory hub. Feeds write into it, the analyzer reads from it, and the dashboard streams snapshots over WebSocket every time state changes.
@@ -185,6 +221,11 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `MIN_ADX_THRESHOLD` | `15.0` | ADX below this forces technical bias to neutral |
 | `BINANCE_SYMBOL` | `BTC-USD` | Coinbase product ID for candle fetch |
 | `BINANCE_KLINES_INTERVAL` | `60` | Candle granularity in seconds |
+| `FUTURES_TAKER_RATIO_HIGH` | `1.15` | Taker ratio above this → long-heavy; blocks NO lock and leans YES in signals |
+| `FUTURES_TAKER_RATIO_LOW` | `0.85` | Taker ratio below this → short-heavy; blocks YES lock and leans NO in signals |
+| `OI_SQUEEZE_THRESHOLD_PCT` | `-1.5` | OI 5-min delta below this blocks YES lock (shrinking OI = no real momentum) |
+| `BINANCE_DEPTH_IMBALANCE_THRESHOLD` | `0.15` | Smoothed depth imbalance magnitude for signal and lock veto |
+| `LIQ_VETO_THRESHOLD_USD` | `500000` | 2-min rolling liquidation USD that triggers a hard lock veto |
 | `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind host |
 | `DASHBOARD_PORT` | `8000` | Dashboard port |
 
@@ -197,13 +238,26 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `logs/session_<ts>.csv` | Every analysis event this session (recommendations, skips, errors) |
 | `logs/predictions.csv` | Cross-session prediction outcomes with resolution and model accuracy |
 | `logs/lifetime_stats.json` | Persisted prediction accuracy counters across all sessions |
-| `logs/bankroll.json` | Hypothetical P&L from every directional prediction |
 | `logs/executor_bankroll.json` | Paper trade P&L — persists across restarts |
 | `logs/resolution_history.json` | Last 100 window resolutions with model accuracy labels |
 
 ---
 
-## Dashboard — Resolution log
+## Dashboard
+
+The live dashboard at `http://127.0.0.1:8000` displays:
+
+- **GBM YES %** — current fair-value probability, colored green (>52%), red (<48%), grey (neutral)
+- **BTC Slope** — weighted $/s velocity, colored green (positive) / red (negative)
+- **Taker Ratio** — 5-min rolling buy/sell volume ratio; green (>1.15 long-heavy), red (<0.85 short-heavy)
+- **Depth Imbalance** — 30-second smoothed top-10 bid/ask quantity imbalance (−1 to +1)
+- **Liq Pressure** — red `⚠ LONG SQZ` or green `⚠ SHORT SQZ` when 2-min rolling liquidations exceed half the veto threshold ($250K)
+- Recommendation panel with live basis list and lock confidence block
+- BTC sparkline with window-open strike line
+- Bot executor P&L and current position
+- Resolution log with per-window model accuracy
+
+### Resolution log format
 
 ```
 KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CORRECT]  slope=CORRECT
@@ -222,5 +276,7 @@ KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CO
 - **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract. At 40¢ entry, round-trip taker cost is ~1.7¢ per contract. Not deducted from paper sizing.
 - **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when available. Falls back to rolling 10-minute realized vol from tick data.
-- **Two bankrolls.** The model bankroll (`logs/bankroll.json`) tracks hypothetical P&L from every directional prediction. The executor bankroll (`logs/executor_bankroll.json`) tracks only actual paper trades placed. They diverge because the model predicts every window but only fires a trade when lock conditions are met.
+- **Binance geo-block.** All three Binance feeds use `fstream.binance.com` (futures streaming), which is US-accessible. The spot WebSocket (`stream.binance.com`) and futures REST (`fapi.binance.com`) return HTTP 451 from the US. The taker ratio is therefore computed locally from the aggTrade stream rather than polled from the REST endpoint.
+- **Taker ratio warmup.** The taker ratio shows `—` until at least one sell-side trade has been observed on the aggTrade stream (typically within one second of connecting). Lock vetoes based on taker ratio only fire when the feed is live (`ratio > 0`).
+- **Two bankrolls.** The executor bankroll (`logs/executor_bankroll.json`) tracks actual paper trades placed. The model predicts every window but only fires a trade when all lock conditions are met, so not every prediction results in a trade.
 - **Position sizing.** Flat $100 per trade (~250 contracts at 40¢). Sizing does not vary by confidence or prior result.

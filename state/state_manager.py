@@ -204,6 +204,22 @@ class StateManager:
         self.cvd_total: float = 0.0              # total BTC volume since window open
         self.cvd_history: deque[tuple[float, float]] = deque(maxlen=5000)  # (ts, delta)
 
+        # Futures taker buy/sell ratio (Binance Futures — polled every 30 s)
+        self.futures_taker_ratio: float = 0.0
+        self.futures_taker_ratio_history: deque[tuple[float, float]] = deque(maxlen=12)
+
+        # Open interest history (for OI delta — appended in update_open_interest)
+        self.oi_history: deque[tuple[float, float]] = deque(maxlen=60)
+
+        # Binance spot orderbook depth imbalance (WebSocket, 100 ms updates)
+        self.binance_depth_imbalance: float = 0.0
+        self.binance_depth_history: deque[tuple[float, float]] = deque(maxlen=3000)
+
+        # Liquidation data (Binance Futures forceOrder stream)
+        self.liq_long_2m: float = 0.0
+        self.liq_short_2m: float = 0.0
+        self.liq_history: deque[tuple[float, float, str]] = deque(maxlen=500)  # (ts, usd, side)
+
         # Analysis conditions (written directly by analyzer — sole writer in asyncio)
         self.analysis: dict = {
             "phase": "waiting",
@@ -494,7 +510,56 @@ class StateManager:
     async def update_open_interest(self, oi: float) -> None:
         async with self._lock:
             self.open_interest = oi
+            self.oi_history.append((time.time(), oi))
         self._dirty.set()
+
+    async def update_futures_taker_ratio(self, ratio: float) -> None:
+        async with self._lock:
+            self.futures_taker_ratio = ratio
+            self.futures_taker_ratio_history.append((time.time(), ratio))
+        self._dirty.set()
+
+    def oi_delta_pct(self, lookback_seconds: float) -> Optional[float]:
+        history = list(self.oi_history)
+        if len(history) < 2:
+            return None
+        now_ts = history[-1][0]
+        cutoff = now_ts - lookback_seconds
+        baseline = next((oi for ts, oi in history if ts >= cutoff), None)
+        if baseline is None or baseline == 0.0:
+            return None
+        current = history[-1][1]
+        return round((current - baseline) / baseline * 100.0, 3)
+
+    async def update_binance_depth(self, imbalance: float) -> None:
+        async with self._lock:
+            self.binance_depth_imbalance = imbalance
+            self.binance_depth_history.append((time.time(), imbalance))
+        self._dirty.set()
+
+    def binance_depth_smoothed(self) -> float:
+        now_ts = time.time()
+        recent = [v for ts, v in self.binance_depth_history if ts >= now_ts - 30.0]
+        if not recent:
+            return 0.0
+        return round(sum(recent) / len(recent), 3)
+
+    async def update_liquidation(self, side: str, usd_value: float) -> None:
+        async with self._lock:
+            now_ts = time.time()
+            self.liq_history.append((now_ts, usd_value, side))
+            cutoff = now_ts - 120.0
+            self.liq_long_2m = sum(v for ts, v, s in self.liq_history if ts >= cutoff and s == "LONG")
+            self.liq_short_2m = sum(v for ts, v, s in self.liq_history if ts >= cutoff and s == "SHORT")
+        self._dirty.set()
+
+    def liq_pressure(self) -> Optional[str]:
+        from config import settings as _s
+        if self.liq_long_2m > _s.liq_veto_threshold_usd:
+            return "long_squeeze"
+        if self.liq_short_2m > _s.liq_veto_threshold_usd:
+            return "short_squeeze"
+        return None
 
     async def update_dvol(self, dvol_pct: float) -> None:
         async with self._lock:
@@ -559,6 +624,7 @@ class StateManager:
     # ── Serialisation ─────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
+        from strategy.scalper import _btc_slope as _slope_fn
         now = time.time()
         ob = self.orderbook
         return {
@@ -567,6 +633,7 @@ class StateManager:
             "btc_price": self.btc_price,
             "btc_history": list(self.btc_history)[-120:],
             "btc_feed_active": self.btc_feed_active,
+            "btc_slope": round(_slope_fn(list(self.btc_history)), 3),
             # Contract / window
             "active_contract": self.active_contract,
             "window_close_ts": self.window_close_ts,
@@ -619,6 +686,14 @@ class StateManager:
             "cvd_total": round(self.cvd_total, 4),
             "cvd_ratio": round(self.cvd_window / self.cvd_total, 3) if self.cvd_total > 0 else 0.0,
             "cvd_5m": round(sum(d for ts, d in self.cvd_history if ts >= now - 300.0), 4),
+            # New feeds
+            "futures_taker_ratio": self.futures_taker_ratio,
+            "futures_taker_ratio_history": list(self.futures_taker_ratio_history)[-12:],
+            "binance_depth_imbalance": self.binance_depth_imbalance,
+            "binance_depth_smoothed": self.binance_depth_smoothed(),
+            "liq_long_2m": round(self.liq_long_2m, 0),
+            "liq_short_2m": round(self.liq_short_2m, 0),
+            "liq_pressure": self.liq_pressure(),
             # Analysis conditions
             "analysis": dict(self.analysis),
             # Recommendation
