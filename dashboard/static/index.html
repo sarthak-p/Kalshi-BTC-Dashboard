@@ -271,7 +271,11 @@ body {
 
         <div>
           <div class="mc-item-label">BTC Slope</div>
-          <div id="btc-slope-val" class="mc-item-val">—</div>
+          <div style="display:flex;align-items:baseline;gap:5px">
+            <div id="btc-slope-val" class="mc-item-val">—</div>
+            <span id="btc-slope-arrow" style="font-size:13px;font-weight:700;transition:color .3s"></span>
+          </div>
+          <div id="btc-slope-trend" style="font-size:10px;margin-top:1px"></div>
           <div id="btc-slope-label" style="font-size:9px;color:var(--muted);margin-top:2px">$/s weighted</div>
         </div>
 
@@ -283,7 +287,11 @@ body {
 
         <div>
           <div class="mc-item-label">Perp Basis</div>
-          <div id="perp-basis-val" class="mc-item-val">—</div>
+          <div style="display:flex;align-items:baseline;gap:5px">
+            <div id="perp-basis-val" class="mc-item-val">—</div>
+            <span id="perp-basis-arrow" style="font-size:13px;font-weight:700;transition:color .3s"></span>
+          </div>
+          <div id="perp-basis-trend" style="font-size:10px;margin-top:1px"></div>
           <div id="perp-basis-label" style="font-size:9px;color:var(--muted);margin-top:2px">Kraken mark − index</div>
         </div>
 
@@ -413,6 +421,8 @@ body {
 <script>
 let lastState = {};
 let ws;
+const perpBasisHistory  = [];
+const btcSlopeHistory   = [];
 
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws');
@@ -675,14 +685,40 @@ function renderMarketConditions(s) {
     cvdEl.textContent = '—'; cvdEl.style.color = 'var(--muted)';
   }
 
-  // BTC slope
-  const slope   = s.btc_slope;
-  const slopeEl = document.getElementById('btc-slope-val');
+  // BTC slope + 90s trend
+  const slope      = s.btc_slope;
+  const slopeEl    = document.getElementById('btc-slope-val');
+  const slopeArrow = document.getElementById('btc-slope-arrow');
+  const slopeTrend = document.getElementById('btc-slope-trend');
   if (slope != null) {
     slopeEl.textContent = (slope >= 0 ? '+' : '') + slope.toFixed(3) + ' $/s';
     slopeEl.style.color = slope > 0.05 ? 'var(--green)' : slope < -0.05 ? 'var(--red)' : 'var(--muted)';
     document.getElementById('btc-slope-label').textContent =
       slope > 0.3 ? 'strong uptrend' : slope < -0.3 ? 'strong downtrend' : slope > 0 ? 'mild up' : slope < 0 ? 'mild down' : 'flat';
+
+    const now = Date.now();
+    btcSlopeHistory.push({ ts: now, val: slope });
+    const cutoff = now - 90_000;
+    while (btcSlopeHistory.length > 1 && btcSlopeHistory[0].ts < cutoff) btcSlopeHistory.shift();
+
+    if (btcSlopeHistory.length >= 3) {
+      const delta    = slope - btcSlopeHistory[0].val;
+      const absDelta = Math.abs(delta);
+      if (absDelta > 0.02) {
+        const rising     = delta > 0;
+        const arrowChar  = rising ? '▲' : '▼';
+        const arrowColor = rising ? 'var(--green)' : 'var(--red)';
+        const deltaStr   = (delta >= 0 ? '+' : '') + delta.toFixed(3) + ' $/s';
+        const elapsed    = Math.round((now - btcSlopeHistory[0].ts) / 1000);
+        slopeArrow.textContent = arrowChar;
+        slopeArrow.style.color = arrowColor;
+        slopeTrend.textContent = deltaStr + ' / ' + elapsed + 's';
+        slopeTrend.style.color = arrowColor;
+      } else {
+        slopeArrow.textContent = '';
+        slopeTrend.textContent = '';
+      }
+    }
   }
 
   // Binance depth imbalance (smoothed)
@@ -695,14 +731,42 @@ function renderMarketConditions(s) {
       depthSmoothed > 0.15 ? 'bid-heavy' : depthSmoothed < -0.15 ? 'ask-heavy' : 'balanced';
   }
 
-  // Kraken perp basis (30s smoothed)
-  const perpBasis = s.perp_basis_smoothed;
-  const perpEl    = document.getElementById('perp-basis-val');
+  // Kraken perp basis (30s smoothed) + 90s trend
+  const perpBasis  = s.perp_basis_smoothed;
+  const perpEl     = document.getElementById('perp-basis-val');
+  const perpArrow  = document.getElementById('perp-basis-arrow');
+  const perpTrend  = document.getElementById('perp-basis-trend');
   if (perpBasis != null && s.perp_mid > 0) {
     perpEl.textContent = (perpBasis >= 0 ? '+$' : '-$') + Math.abs(perpBasis).toFixed(0);
     perpEl.style.color = perpBasis > 80 ? 'var(--green)' : perpBasis < -80 ? 'var(--red)' : 'var(--muted)';
     document.getElementById('perp-basis-label').textContent =
       perpBasis > 80 ? 'bull lead' : perpBasis < -80 ? 'bear lead' : 'neutral';
+
+    // Track rolling 90s history
+    const now = Date.now();
+    perpBasisHistory.push({ ts: now, val: perpBasis });
+    const cutoff = now - 90_000;
+    while (perpBasisHistory.length > 1 && perpBasisHistory[0].ts < cutoff) perpBasisHistory.shift();
+
+    if (perpBasisHistory.length >= 3) {
+      const delta     = perpBasis - perpBasisHistory[0].val;
+      const absDelta  = Math.abs(delta);
+      const threshold = 5;
+      if (absDelta > threshold) {
+        const rising      = delta > 0;
+        const arrowChar   = rising ? '▲' : '▼';
+        const arrowColor  = rising ? 'var(--green)' : 'var(--red)';
+        const deltaStr    = (delta >= 0 ? '+$' : '-$') + absDelta.toFixed(0);
+        const elapsed     = Math.round((now - perpBasisHistory[0].ts) / 1000);
+        perpArrow.textContent  = arrowChar;
+        perpArrow.style.color  = arrowColor;
+        perpTrend.textContent  = deltaStr + ' / ' + elapsed + 's';
+        perpTrend.style.color  = arrowColor;
+      } else {
+        perpArrow.textContent = '';
+        perpTrend.textContent = '';
+      }
+    }
   }
 
 }
