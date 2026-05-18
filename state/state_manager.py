@@ -210,7 +210,7 @@ class StateManager:
         self.futures_taker_ratio_history: deque[tuple[float, float]] = deque(maxlen=12)
 
         # Open interest history (for OI delta — appended in update_open_interest)
-        self.oi_history: deque[tuple[float, float]] = deque(maxlen=60)
+        self.oi_history: deque[tuple[float, float]] = deque(maxlen=600)
 
         # Binance spot orderbook depth imbalance (WebSocket, 100 ms updates)
         self.binance_depth_imbalance: float = 0.0
