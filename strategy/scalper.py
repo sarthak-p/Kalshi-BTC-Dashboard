@@ -730,26 +730,23 @@ class Analyzer:
 
     async def _refresh_bias(self) -> None:
         from strategy.technicals import fetch_bias, fetch_market_sentiment
-        # Only update RSI/BB/ADX bias between windows — mid-window crashes or bounces
-        # would otherwise silently flip pre_window_bias and change the executor's decision.
-        if not self.state.active_contract:
-            bias = await fetch_bias(
-                symbol=self.cfg.binance_symbol,
-                interval=self.cfg.binance_klines_interval,
-                limit=35,
-                min_adx=self.cfg.min_adx_threshold,
+        bias = await fetch_bias(
+            symbol=self.cfg.binance_symbol,
+            interval=self.cfg.binance_klines_interval,
+            limit=35,
+            min_adx=self.cfg.min_adx_threshold,
+        )
+        if bias is not None:
+            await self.state.update_technicals(
+                bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
             )
-            if bias is not None:
-                await self.state.update_technicals(
-                    bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
-                )
-                await self.logger.log("technicals", {
-                    "rsi": bias.rsi,
-                    "adx": bias.adx,
-                    "bb_pos": bias.bb_position,
-                    "bb_width": bias.bb_width,
-                    "bias": bias.bias,
-                })
+            await self.logger.log("technicals", {
+                "rsi": bias.rsi,
+                "adx": bias.adx,
+                "bb_pos": bias.bb_position,
+                "bb_width": bias.bb_width,
+                "bias": bias.bias,
+            })
 
         sentiment = await fetch_market_sentiment()
         if sentiment is not None:
