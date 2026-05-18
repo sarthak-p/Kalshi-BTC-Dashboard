@@ -46,10 +46,6 @@ The GBM model uses current BTC velocity (slope) as a drift term to shift the fai
 
 **Settlement** — at window close the position is marked won/lost based on the official Kalshi result.
 
-### Position sizing
-
-Flat **$100 per trade**. At 40¢ entry that's ~250 contracts; at 60¢ entry ~166 contracts. Sizing does not vary by confidence or prior result.
-
 ---
 
 ## The GBM model
@@ -166,7 +162,7 @@ main.py
   → BinanceLiqFeed.run()              Binance Futures forceOrder → 2-min rolling liquidations
   → Analyzer.run()
       _analysis_loop()                GBM fair value + recommendation (every 50 ms)
-      _bias_refresher()               RSI/BB (between windows only) + DVOL + OKX funding (every 15 s)
+      _bias_refresher()               RSI/BB/ADX + DVOL + OKX funding (every 15 s, throughout window)
       _window_resolver()              settlement + accuracy tracking (every 1 s)
   → Executor
       maybe_trade()                   fill based on locked model recommendation

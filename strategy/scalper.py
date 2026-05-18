@@ -425,7 +425,7 @@ def _compute_recommendation(
     }
 
 class Analyzer:
-    _LOCK_STABILITY_SECS = 15.0  # signal must hold the same side this long before locking
+    _LOCK_STABILITY_SECS = 30.0  # signal must hold the same side this long before locking
 
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state

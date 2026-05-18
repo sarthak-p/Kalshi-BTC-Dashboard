@@ -8,7 +8,21 @@ from __future__ import annotations
 from config import Settings
 from state.state_manager import StateManager
 
-_UNIT_SIZE_USD = 100.0  # fixed dollars risked per trade
+_BASE_SIZE_USD = 100.0
+_MAX_SIZE_USD  = 200.0
+_MIN_SIZE_USD  = 50.0
+
+
+def _calc_size_usd(gap_cents: float, signal_count: int) -> float:
+    """Scale position size by GBM-market gap and confirming signal breadth.
+
+    gap_cents=20, signal_count=5 → $100 (base).
+    Wide gap + many confirmers → up to $200; narrow gap + few → floor at $50.
+    """
+    gap_factor    = gap_cents / 20.0
+    signal_factor = max(0.5, min(1.0, signal_count / 5.0))
+    raw = _BASE_SIZE_USD * gap_factor * signal_factor
+    return max(_MIN_SIZE_USD, min(_MAX_SIZE_USD, round(raw, 2)))
 
 
 class Executor:
@@ -73,14 +87,21 @@ class Executor:
                 )
                 return
 
-        n_contracts = max(1, int(_UNIT_SIZE_USD / (price / 100.0)))
-        await self._paper_fill(contract, target_side, n_contracts, price)
+        gap          = self.state.final_model_gap
+        signal_count = self.state.recommendation.get("signal_count", 0)
+        size_usd     = _calc_size_usd(gap, signal_count)
+        n_contracts  = max(1, int(size_usd / (price / 100.0)))
+        await self._paper_fill(contract, target_side, n_contracts, price, size_usd, gap, signal_count)
 
-    async def _paper_fill(self, ticker: str, side: str, contracts: int, fill_price: float) -> None:
+    async def _paper_fill(
+        self, ticker: str, side: str, contracts: int, fill_price: float,
+        size_usd: float = _BASE_SIZE_USD, gap: float = 0.0, signal_count: int = 0,
+    ) -> None:
         cost = round(contracts * fill_price / 100.0, 2)
         await self.state.open_position(ticker, side, contracts, fill_price, "paper")
         await self.state.log_event(
             f"📄 {side}  {contracts} × {fill_price:.1f}¢  cost ${cost:.2f}  "
+            f"[size ${size_usd:.0f}  gap {gap:+.1f}¢  sigs {signal_count}]  "
             f"balance ${self.state.executor_bankroll:.2f}"
         )
 
