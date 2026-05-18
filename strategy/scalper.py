@@ -3,7 +3,7 @@ Market analyzer — computes GBM fair-value, technicals, and a trade recommendat
 every tick. No orders are placed; this is a decision-support tool.
 
 Recommendation logic (3-signal vote):
-  1. GBM model  — fv > 55 → YES lean, fv < 45 → NO lean
+  1. GBM model  — fv > 60 → YES lean, fv < 40 → NO lean
   2. BTC move   — |change| > MOMENTUM_ENTRY_USD and direction → bullish/bearish
   3. Tech bias  — pre-window RSI/BB bias: up/down/neutral
 
@@ -177,11 +177,11 @@ def _compute_recommendation(
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value — 65/35 (asymmetric: YES bar higher to account for faster Kalshi repricing on upside)
-    if fv > 65:
+    # GBM fair-value — 60/40 thresholds
+    if fv > 60:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 35:
+    elif fv < 40:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
@@ -229,10 +229,10 @@ def _compute_recommendation(
             basis.append("Technicals: neutral (GBM driving)")
     elif slope_side is not None:
         # Slope may only drive when GBM has moved meaningfully in the same direction.
-        # YES: fv > 60 (primary fires at 70, so slope covers the 60–70 window)
-        # NO:  fv < 40 (primary fires at 35, so slope covers the 35–40 window)
-        gbm_confirms_slope = (slope_side == "YES" and fv > 60.0) or \
-                              (slope_side == "NO"  and fv < 40.0)
+        # YES: fv > 55 (primary fires at 60, so slope covers the 55–60 window)
+        # NO:  fv < 45 (primary fires at 40, so slope covers the 40–45 window)
+        gbm_confirms_slope = (slope_side == "YES" and fv > 55.0) or \
+                              (slope_side == "NO"  and fv < 45.0)
         if gbm_confirms_slope:
             side = slope_side
             if bias_side is not None and bias_side != slope_side:
@@ -407,7 +407,7 @@ def _compute_recommendation(
     }
 
 class Analyzer:
-    _LOCK_STABILITY_SECS = 30.0  # signal must hold the same side this long before locking
+    _LOCK_STABILITY_SECS = 20.0  # signal must hold the same side this long before locking
 
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state
@@ -574,11 +574,10 @@ class Analyzer:
             locked = None
 
         # Break the 60-second flip lock early when GBM crosses the stop-loss threshold.
-        # NO lock: unlock at 60% — BTC has fully recovered, BRTI noise dominates beyond here.
-        # YES lock: unlock at 40% — symmetric.
+        # Tightened to 45/55 so reversals are detected within ~5 GBM points of centre.
         gbm_strongly_opposes = (
-            (locked == "YES" and fv <= 40.0) or
-            (locked == "NO"  and fv >= 60.0)
+            (locked == "YES" and fv <= 45.0) or
+            (locked == "NO"  and fv >= 55.0)
         )
 
         if current_side is not None:
@@ -638,16 +637,17 @@ class Analyzer:
                     }
                 # Slope must confirm lock direction — flat/opposing slope indicates a wick recovery
                 slope_aligns = (raw_side == "YES" and slope >= 0.05) or \
-                               (raw_side == "NO"  and slope <= -0.05)
+                               (raw_side == "NO"  and slope <= -0.05) or \
+                               abs(fv - 50.0) > 25.0  # bypass when GBM already very extreme
                 if not slope_aligns:
                     if not self._slope_suppressed_logged:
                         self._slope_suppressed_logged = True
                         await self.state.log_event(
                             f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (waiting for alignment)"
                         )
-                elif abs(fv - 50.0) < 12.0:
+                elif abs(fv - 50.0) < 10.0:
                     await self.state.log_event(
-                        f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<12)"
+                        f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<10)"
                     )
                 else:
                     _oi_d   = self.state.oi_delta_pct(300.0)
@@ -655,7 +655,13 @@ class Analyzer:
                     _taker  = self.state.futures_taker_ratio
                     _depth_s = self.state.binance_depth_smoothed()
                     _skip = None
-                    if _oi_d is not None and _oi_d < self.cfg.oi_squeeze_threshold_pct and raw_side == "YES":
+                    if gap is not None and gap > 25.0:
+                        # Kalshi market strongly opposes our model direction.
+                        # Empirically: when |GBM − market mid| > 25¢, model accuracy drops to ~20%.
+                        # The market aggregates BRTI-constituent exchange data we cannot see directly.
+                        _skip = (f"market opposes {raw_side}: Kalshi mid {kalshi_mid:.0f}¢ vs "
+                                 f"GBM {fv:.0f}% (gap +{gap:.1f}¢ > 25¢)")
+                    elif _oi_d is not None and _oi_d < self.cfg.oi_squeeze_threshold_pct and raw_side == "YES":
                         _skip = (f"OI squeeze {_oi_d:.1f}% < "
                                  f"{self.cfg.oi_squeeze_threshold_pct:.1f}% (YES blocked)")
                     elif (_oi_d is not None and _oi_d > -self.cfg.oi_squeeze_threshold_pct

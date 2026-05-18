@@ -139,6 +139,7 @@ class StateManager:
         starting_bankroll: float = 250.0,
     ):
         # Feed state
+        self._exchange_prices: dict[str, float] = {"coinbase": 0.0, "kraken": 0.0, "bitstamp": 0.0}
         self.btc_price: float = 0.0
         self.btc_history: deque[tuple[float, float]] = deque(maxlen=6000)
         self.btc_feed_active: bool = False
@@ -295,15 +296,26 @@ class StateManager:
 
     # ── State-update methods ──────────────────────────────────────────────────
 
+    def _compute_btc_avg(self) -> float:
+        active = [p for p in self._exchange_prices.values() if p > 0.0]
+        return sum(active) / len(active) if active else 0.0
+
     async def update_btc(self, price: float) -> None:
         async with self._lock:
             ts = time.time()
-            self.btc_price = price
-            self.btc_history.append((ts, price))
+            self._exchange_prices["coinbase"] = price
+            self.btc_price = self._compute_btc_avg()
+            self.btc_history.append((ts, self.btc_price))
             self.btc_feed_active = True
             if self.btc_open == 0.0 and self.active_contract:
-                self.btc_open = price
-            self._update_momentum_velocity(ts, price)
+                self.btc_open = self.btc_price
+            self._update_momentum_velocity(ts, self.btc_price)
+        self._dirty.set()
+
+    async def update_exchange_price(self, exchange: str, price: float) -> None:
+        async with self._lock:
+            self._exchange_prices[exchange] = price
+            self.btc_price = self._compute_btc_avg()
         self._dirty.set()
 
     def _update_momentum_velocity(self, now: float, price: float) -> None:
@@ -631,6 +643,7 @@ class StateManager:
             "ts": now,
             # BTC
             "btc_price": self.btc_price,
+            "exchange_prices": dict(self._exchange_prices),
             "btc_history": list(self.btc_history)[-120:],
             "btc_feed_active": self.btc_feed_active,
             "btc_slope": round(_slope_fn(list(self.btc_history)), 3),

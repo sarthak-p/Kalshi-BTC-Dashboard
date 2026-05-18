@@ -14,9 +14,11 @@ from config import settings
 from dashboard.app import app
 from feeds.binance_depth_feed import BinanceDepthFeed
 from feeds.binance_liq_feed import BinanceLiqFeed
+from feeds.bitstamp_feed import BitstampFeed
 from feeds.btc_feed import BtcFeed
 from feeds.futures_taker_feed import FuturesTakerFeed
 from feeds.kalshi_ws import KalshiFeed
+from feeds.kraken_feed import KrakenFeed
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 from strategy.scalper import Analyzer
@@ -33,6 +35,8 @@ async def main() -> None:
 
     kalshi_feed   = KalshiFeed(state=state, cfg=settings, logger=logger)
     btc_feed      = BtcFeed(state=state, cfg=settings, logger=logger)
+    kraken_feed   = KrakenFeed(state=state, cfg=settings, logger=logger)
+    bitstamp_feed = BitstampFeed(state=state, cfg=settings, logger=logger)
     taker_feed    = FuturesTakerFeed(state=state, cfg=settings)
     depth_feed    = BinanceDepthFeed(state=state, cfg=settings)
     liq_feed      = BinanceLiqFeed(state=state, cfg=settings)
@@ -68,7 +72,7 @@ async def main() -> None:
         f"\n  Kalshi BTC Dashboard\n"
         f"  Open → http://{settings.dashboard_host}:{settings.dashboard_port}\n"
         f"  Env: {settings.kalshi_env}  |  Series: {settings.btc_series_ticker}\n"
-        f"  BTC feed: Coinbase BTC-USD\n"
+        f"  BTC feeds: Coinbase + Kraken + Bitstamp (equal-weighted avg)\n"
     )
 
     await asyncio.gather(
@@ -76,6 +80,8 @@ async def main() -> None:
         state.broadcast_loop(),
         kalshi_feed.run(),
         btc_feed.run(),
+        kraken_feed.run(),
+        bitstamp_feed.run(),
         taker_feed.run(),
         depth_feed.run(),
         liq_feed.run(),

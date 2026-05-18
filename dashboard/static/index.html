@@ -90,7 +90,6 @@ body {
 .tier-moderate { background:rgba(245,158,11,.15);  color:var(--yellow); }
 .tier-neutral  { background:rgba(100,116,139,.12); color:var(--muted);  }
 .metric-card.glow-extreme { border-color:var(--green); box-shadow:0 0 10px rgba(16,185,129,.25); }
-#rec-header  { font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:var(--muted); margin-bottom:10px; }
 #rec-action  { font-size:28px; font-weight:700; letter-spacing:1px; margin-bottom:8px; }
 #rec-action.yes { color:var(--green); }
 #rec-action.no  { color:var(--red); }
@@ -144,9 +143,13 @@ body {
     <span id="time-left">--:--</span>
   </div>
   <div class="feed-dots">
-    <div class="dot" id="dot-btc" title="BTC feed"></div>
-    <span class="dot-label">BTC</span>
-    <div class="dot" id="dot-kalshi" title="Kalshi feed" style="margin-left:6px"></div>
+    <div class="dot" id="dot-coinbase" title="Coinbase feed"></div>
+    <span class="dot-label">CB</span>
+    <div class="dot" id="dot-kraken" title="Kraken feed" style="margin-left:4px"></div>
+    <span class="dot-label">KR</span>
+    <div class="dot" id="dot-bitstamp" title="Bitstamp feed" style="margin-left:4px"></div>
+    <span class="dot-label">BS</span>
+    <div class="dot" id="dot-kalshi" title="Kalshi feed" style="margin-left:8px"></div>
     <span class="dot-label">KALSHI</span>
   </div>
   <span id="velocity-badge">⚡ VELOCITY PAUSE</span>
@@ -190,7 +193,6 @@ body {
   <div class="panel">
     <div class="panel-header">
       <span>Bot Executor</span>
-      <span id="exec-mode-badge" style="font-size:10px;font-weight:700;letter-spacing:1px;padding:2px 10px;border-radius:12px;background:rgba(245,158,11,.15);color:var(--yellow)">PAPER</span>
     </div>
     <div class="panel-body">
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
@@ -222,7 +224,6 @@ body {
   <div class="panel">
     <div class="panel-header">
       <span>Market Conditions</span>
-      <span id="phase-badge" style="font-size:10px;padding:2px 8px;border-radius:3px;background:var(--surface);color:var(--muted)">—</span>
     </div>
     <div class="panel-body" style="padding:10px 14px">
       <div class="mc-grid">
@@ -262,33 +263,15 @@ body {
         </div>
 
         <div>
-          <div class="mc-item-label">GBM YES %</div>
-          <div id="gbm-pct-val" class="mc-item-val">—</div>
-          <div id="gbm-pct-label" style="font-size:9px;color:var(--muted);margin-top:2px">model fair-value</div>
-        </div>
-
-        <div>
           <div class="mc-item-label">BTC Slope</div>
           <div id="btc-slope-val" class="mc-item-val">—</div>
           <div id="btc-slope-label" style="font-size:9px;color:var(--muted);margin-top:2px">$/s weighted</div>
         </div>
 
         <div>
-          <div class="mc-item-label">Taker Ratio</div>
-          <div id="taker-ratio-val" class="mc-item-val">—</div>
-          <div id="taker-ratio-label" style="font-size:9px;color:var(--muted);margin-top:2px">long/short buy vol</div>
-        </div>
-
-        <div>
           <div class="mc-item-label">Depth Imbalance</div>
           <div id="depth-imb-val" class="mc-item-val">—</div>
           <div id="depth-imb-label" style="font-size:9px;color:var(--muted);margin-top:2px">top-10 bid vs ask</div>
-        </div>
-
-        <div>
-          <div class="mc-item-label">Liq Pressure</div>
-          <div id="liq-pressure-val" class="mc-item-val" style="font-size:14px">—</div>
-          <div id="liq-pressure-label" style="font-size:9px;color:var(--muted);margin-top:2px">2-min rolling</div>
         </div>
 
       </div>
@@ -302,11 +285,9 @@ body {
     <div class="panel">
       <div class="panel-header">
         <span>Recommendation</span>
-        <span id="rec-phase-badge" style="font-size:10px;padding:2px 8px;border-radius:3px;background:var(--surface)">—</span>
       </div>
       <div class="panel-body">
         <div id="rec-box">
-          <div id="rec-header">Model Recommendation</div>
           <div id="rec-action" class="neutral">WAIT</div>
           <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px">
             <span id="rec-tier" class="tier-badge tier-neutral">NEUTRAL</span>
@@ -344,8 +325,7 @@ body {
     <!-- BTC panel -->
     <div class="panel">
       <div class="panel-header">
-        <span>BTC Price (Coinbase)</span>
-        <span id="btc-tick" style="color:var(--muted);font-size:10px">—</span>
+        <span>BTC Price (3-Exchange Avg)</span>
       </div>
       <div class="panel-body">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
@@ -371,6 +351,7 @@ body {
           <div class="fv-row"><span class="fv-key">Est. Close Price</span><span class="fv-val" id="fv-predicted-close">—</span></div>
           <div class="fv-row"><span class="fv-key">YES ask (buy UP)</span><span class="fv-val" id="fv-yes-ask" style="color:var(--green)">—</span></div>
           <div class="fv-row"><span class="fv-key">NO ask (buy DOWN)</span><span class="fv-val" id="fv-no-ask" style="color:var(--red)">—</span></div>
+          <div class="fv-row" style="grid-column:1/-1"><span class="fv-key">Sources</span><span id="fv-exchange-sources" style="font-size:11px;color:var(--muted)">—</span></div>
           <div class="fv-row" style="grid-column:1/-1"><span class="fv-key">Last resolved</span><span class="fv-val" id="fv-last-resolved" style="font-size:11px;color:var(--muted)">—</span></div>
         </div>
       </div>
@@ -454,13 +435,12 @@ function renderExecutor(s) {
   const modeStyle = isLive
     ? { bg: 'rgba(16,185,129,.15)', color: 'var(--green)', label: 'LIVE' }
     : { bg: 'rgba(245,158,11,.15)', color: 'var(--yellow)', label: 'PAPER' };
-  ['trading-mode-badge','exec-mode-badge'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = modeStyle.label;
-    el.style.background = modeStyle.bg;
-    el.style.color = modeStyle.color;
-  });
+  const tbEl = document.getElementById('trading-mode-badge');
+  if (tbEl) {
+    tbEl.textContent = modeStyle.label;
+    tbEl.style.background = modeStyle.bg;
+    tbEl.style.color = modeStyle.color;
+  }
 
   const origBal = s.executor_bankroll_original != null ? s.executor_bankroll_original : execBal;
 
@@ -534,8 +514,11 @@ function renderTopBar(s) {
   } else {
     document.getElementById('contract-sub').textContent = '—';
   }
-  document.getElementById('dot-btc').className    = 'dot ' + (s.btc_feed_active   ? 'live' : 'dead');
-  document.getElementById('dot-kalshi').className = 'dot ' + (s.kalshi_feed_active ? 'live' : 'dead');
+  const exPrices = s.exchange_prices || {};
+  document.getElementById('dot-coinbase').className = 'dot ' + (exPrices.coinbase > 0 ? 'live' : 'dead');
+  document.getElementById('dot-kraken').className   = 'dot ' + (exPrices.kraken   > 0 ? 'live' : 'dead');
+  document.getElementById('dot-bitstamp').className = 'dot ' + (exPrices.bitstamp  > 0 ? 'live' : 'dead');
+  document.getElementById('dot-kalshi').className   = 'dot ' + (s.kalshi_feed_active ? 'live' : 'dead');
   document.getElementById('velocity-badge').style.display = s.velocity_pause ? 'inline-block' : 'none';
   if (s.session_start_ts) {
     const elapsed = Date.now() / 1000 - s.session_start_ts;
@@ -596,27 +579,20 @@ function renderMetrics(s) {
 // ── Market conditions ────────────────────────────────────────────────────────
 function renderMarketConditions(s) {
   const tech = s.technicals || {};
-  const left = s.window_seconds_left || 0;
 
   // Phase — use the server-computed value so thresholds stay in sync with config
-  const phase    = (s.analysis && s.analysis.phase) || 'waiting';
-  const phaseEl  = document.getElementById('phase-val');
-  const phaseBadge = document.getElementById('phase-badge');
+  const phase   = (s.analysis && s.analysis.phase) || 'waiting';
+  const phaseEl = document.getElementById('phase-val');
   if (!s.active_contract || phase === 'waiting') {
     phaseEl.textContent = 'NO CONTRACT'; phaseEl.style.color = 'var(--muted)';
-    phaseBadge.textContent = '—'; phaseBadge.style.color = 'var(--muted)';
   } else if (phase === 'monitoring') {
     phaseEl.textContent = 'MONITORING'; phaseEl.style.color = 'var(--muted)';
-    phaseBadge.textContent = 'monitoring'; phaseBadge.style.color = 'var(--muted)';
   } else if (phase === 'entry_open') {
     phaseEl.textContent = 'ENTRY OPEN'; phaseEl.style.color = 'var(--green)';
-    phaseBadge.textContent = '✓ ENTRY WINDOW'; phaseBadge.style.color = 'var(--green)';
   } else if (phase === 'too_late') {
     phaseEl.textContent = 'TOO LATE'; phaseEl.style.color = 'var(--red)';
-    phaseBadge.textContent = '✗ TOO LATE'; phaseBadge.style.color = 'var(--red)';
   } else {
     phaseEl.textContent = 'CLOSING'; phaseEl.style.color = 'var(--red)';
-    phaseBadge.textContent = 'closing'; phaseBadge.style.color = 'var(--red)';
   }
 
   // ADX
@@ -664,14 +640,6 @@ function renderMarketConditions(s) {
     cvdEl.textContent = '—'; cvdEl.style.color = 'var(--muted)';
   }
 
-  // GBM YES %
-  const gbmPct   = s.prediction_yes_pct;
-  const gbmEl    = document.getElementById('gbm-pct-val');
-  if (gbmPct != null) {
-    gbmEl.textContent = gbmPct.toFixed(1) + '%';
-    gbmEl.style.color = gbmPct > 52 ? 'var(--green)' : gbmPct < 48 ? 'var(--red)' : 'var(--muted)';
-  }
-
   // BTC slope
   const slope   = s.btc_slope;
   const slopeEl = document.getElementById('btc-slope-val');
@@ -680,18 +648,6 @@ function renderMarketConditions(s) {
     slopeEl.style.color = slope > 0.05 ? 'var(--green)' : slope < -0.05 ? 'var(--red)' : 'var(--muted)';
     document.getElementById('btc-slope-label').textContent =
       slope > 0.3 ? 'strong uptrend' : slope < -0.3 ? 'strong downtrend' : slope > 0 ? 'mild up' : slope < 0 ? 'mild down' : 'flat';
-  }
-
-  // Futures taker ratio
-  const takerRatio = s.futures_taker_ratio;
-  const takerEl    = document.getElementById('taker-ratio-val');
-  if (takerRatio > 0) {
-    takerEl.textContent = takerRatio.toFixed(3);
-    takerEl.style.color = takerRatio >= 1.15 ? 'var(--green)' : takerRatio <= 0.85 ? 'var(--red)' : 'var(--muted)';
-    document.getElementById('taker-ratio-label').textContent =
-      takerRatio >= 1.15 ? 'long-heavy' : takerRatio <= 0.85 ? 'short-heavy' : 'neutral';
-  } else {
-    takerEl.textContent = '—'; takerEl.style.color = 'var(--muted)';
   }
 
   // Binance depth imbalance (smoothed)
@@ -704,55 +660,17 @@ function renderMarketConditions(s) {
       depthSmoothed > 0.15 ? 'bid-heavy' : depthSmoothed < -0.15 ? 'ask-heavy' : 'balanced';
   }
 
-  // Liquidation pressure warning
-  const liqLong  = s.liq_long_2m  || 0;
-  const liqShort = s.liq_short_2m || 0;
-  const liqEl    = document.getElementById('liq-pressure-val');
-  const liqLab   = document.getElementById('liq-pressure-label');
-  const halfThreshold = 250000;
-  if (liqLong >= halfThreshold) {
-    liqEl.textContent = '⚠ LONG SQZ';
-    liqEl.style.color = 'var(--red)';
-    liqLab.textContent = '$' + (liqLong / 1e6).toFixed(2) + 'M liq';
-  } else if (liqShort >= halfThreshold) {
-    liqEl.textContent = '⚠ SHORT SQZ';
-    liqEl.style.color = 'var(--green)';
-    liqLab.textContent = '$' + (liqShort / 1e6).toFixed(2) + 'M liq';
-  } else {
-    liqEl.textContent = '—';
-    liqEl.style.color = 'var(--muted)';
-    const maxLiq = Math.max(liqLong, liqShort);
-    liqLab.textContent = maxLiq > 0 ? '$' + (maxLiq / 1e3).toFixed(0) + 'K 2m' : 'no squeeze';
-  }
 }
 
 // ── Recommendation ─────────────────────────────────────────────────────────
 function renderRecommendation(s) {
-  const rec      = s.recommendation || {};
-  const tau      = s.window_seconds_left || 0;
-  const side     = rec.side;
-  const box      = document.getElementById('rec-box');
-  const actEl    = document.getElementById('rec-action');
-  const entEl    = document.getElementById('rec-entry');
-  const basisEl  = document.getElementById('rec-basis');
-  const warnEl   = document.getElementById('rec-phase-warn');
-  const phaseBadge = document.getElementById('rec-phase-badge');
-
-  // Phase badge — mirror the server-computed phase
-  const recPhase = (s.analysis && s.analysis.phase) || 'waiting';
-  if (!s.active_contract || recPhase === 'waiting') {
-    phaseBadge.textContent = '—';
-    phaseBadge.style.color = 'var(--muted)';
-  } else if (recPhase === 'monitoring') {
-    phaseBadge.textContent = 'MONITORING';
-    phaseBadge.style.color = 'var(--muted)';
-  } else if (recPhase === 'entry_open') {
-    phaseBadge.textContent = '✓ ENTRY WINDOW';
-    phaseBadge.style.color = 'var(--green)';
-  } else {
-    phaseBadge.textContent = '✗ TOO LATE';
-    phaseBadge.style.color = 'var(--red)';
-  }
+  const rec     = s.recommendation || {};
+  const side    = rec.side;
+  const box     = document.getElementById('rec-box');
+  const actEl   = document.getElementById('rec-action');
+  const entEl   = document.getElementById('rec-entry');
+  const basisEl = document.getElementById('rec-basis');
+  const warnEl  = document.getElementById('rec-phase-warn');
 
   const yp   = s.prediction_yes_pct;
   const tier = gbmTier(yp);
@@ -860,7 +778,6 @@ function renderRecommendation(s) {
 function renderBtc(s) {
   const price = s.btc_price || 0;
   document.getElementById('btc-price').textContent = price > 0 ? '$' + fmt(price) : '—';
-  document.getElementById('btc-tick').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
 
   if (s.btc_history && s.btc_history.length > 1)
     renderSparkline(s.btc_history.map(p => p[1]), s.btc_open);
@@ -899,6 +816,13 @@ function renderBtc(s) {
       el.style.color = delta >= 0 ? 'var(--green)' : 'var(--red)';
     }
   }
+
+  const exch = s.exchange_prices || {};
+  const exchParts = [];
+  if (exch.coinbase > 0) exchParts.push('CB $' + fmt(exch.coinbase));
+  if (exch.kraken   > 0) exchParts.push('KR $' + fmt(exch.kraken));
+  if (exch.bitstamp > 0) exchParts.push('BS $' + fmt(exch.bitstamp));
+  setVal('fv-exchange-sources', exchParts.length ? exchParts.join('  ·  ') : '—');
 
   if (s.last_resolution_msg) {
     const el = document.getElementById('fv-last-resolved');
