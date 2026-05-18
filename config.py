@@ -49,9 +49,6 @@ class Settings(BaseSettings):
     # Ensures we only trade when our model disagrees meaningfully with the market
     min_gbm_market_gap_cents: float = Field(default=8.0, env="MIN_GBM_MARKET_GAP_CENTS")
 
-    # ── Thin-market filter ────────────────────────────────────────────────────
-    min_open_interest: float = Field(default=500.0, env="MIN_OPEN_INTEREST")
-
     # ── New-window settle delay ───────────────────────────────────────────────
     new_window_settle_s: float = Field(default=15.0, env="NEW_WINDOW_SETTLE_S")
 
@@ -78,7 +75,6 @@ class Settings(BaseSettings):
     # ── New feeds ─────────────────────────────────────────────────────────────
     futures_taker_ratio_high: float = Field(default=1.15, env="FUTURES_TAKER_RATIO_HIGH")
     futures_taker_ratio_low: float = Field(default=0.85, env="FUTURES_TAKER_RATIO_LOW")
-    oi_squeeze_threshold_pct: float = Field(default=-1.5, env="OI_SQUEEZE_THRESHOLD_PCT")
     binance_depth_imbalance_threshold: float = Field(default=0.15, env="BINANCE_DEPTH_IMBALANCE_THRESHOLD")
     liq_veto_threshold_usd: float = Field(default=500000.0, env="LIQ_VETO_THRESHOLD_USD")
 

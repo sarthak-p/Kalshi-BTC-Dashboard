@@ -149,6 +149,8 @@ body {
     <span class="dot-label">KR</span>
     <div class="dot" id="dot-bitstamp" title="Bitstamp feed" style="margin-left:4px"></div>
     <span class="dot-label">BS</span>
+    <div class="dot" id="dot-gemini" title="Gemini feed" style="margin-left:4px"></div>
+    <span class="dot-label">GE</span>
     <div class="dot" id="dot-kalshi" title="Kalshi feed" style="margin-left:8px"></div>
     <span class="dot-label">KALSHI</span>
   </div>
@@ -160,7 +162,7 @@ body {
 <div id="main">
 
   <!-- Top metrics row -->
-  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px">
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px">
     <div class="metric-card" id="m-fv-card">
       <div class="metric-label">GBM — YES prob</div>
       <div class="metric-value" id="m-fv">—</div>
@@ -186,6 +188,11 @@ body {
       <div class="metric-label">Open Interest</div>
       <div class="metric-value" id="m-oi">—</div>
       <div class="metric-sub">contracts</div>
+    </div>
+    <div class="metric-card" id="m-edge-card">
+      <div class="metric-label">Live Edge (GBM − Mid)</div>
+      <div class="metric-value" id="m-edge">—</div>
+      <div class="metric-sub" id="m-edge-sub">model vs market</div>
     </div>
   </div>
 
@@ -274,6 +281,12 @@ body {
           <div id="depth-imb-label" style="font-size:9px;color:var(--muted);margin-top:2px">top-10 bid vs ask</div>
         </div>
 
+        <div>
+          <div class="mc-item-label">Perp Basis</div>
+          <div id="perp-basis-val" class="mc-item-val">—</div>
+          <div id="perp-basis-label" style="font-size:9px;color:var(--muted);margin-top:2px">Kraken mark − index</div>
+        </div>
+
       </div>
     </div>
   </div>
@@ -325,7 +338,7 @@ body {
     <!-- BTC panel -->
     <div class="panel">
       <div class="panel-header">
-        <span>BTC Price (3-Exchange Avg)</span>
+        <span>BTC Price (4-Exchange Avg)</span>
       </div>
       <div class="panel-body">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
@@ -518,6 +531,7 @@ function renderTopBar(s) {
   document.getElementById('dot-coinbase').className = 'dot ' + (exPrices.coinbase > 0 ? 'live' : 'dead');
   document.getElementById('dot-kraken').className   = 'dot ' + (exPrices.kraken   > 0 ? 'live' : 'dead');
   document.getElementById('dot-bitstamp').className = 'dot ' + (exPrices.bitstamp  > 0 ? 'live' : 'dead');
+  document.getElementById('dot-gemini').className   = 'dot ' + (exPrices.gemini    > 0 ? 'live' : 'dead');
   document.getElementById('dot-kalshi').className   = 'dot ' + (s.kalshi_feed_active ? 'live' : 'dead');
   document.getElementById('velocity-badge').style.display = s.velocity_pause ? 'inline-block' : 'none';
   if (s.session_start_ts) {
@@ -574,6 +588,27 @@ function renderMetrics(s) {
 
   document.getElementById('m-oi').textContent =
     s.open_interest > 0 ? Math.round(s.open_interest).toLocaleString() : '—';
+
+  // Live edge: GBM fair value minus Kalshi mid (in cents)
+  // Positive = model says YES is underpriced. Negative = model says NO is underpriced.
+  const mid    = (s.orderbook || {}).mid;
+  const edgeEl = document.getElementById('m-edge');
+  const edgeSub = document.getElementById('m-edge-sub');
+  if (mid != null && s.active_contract) {
+    const edge = yp - mid;
+    edgeEl.textContent = (edge >= 0 ? '+' : '') + edge.toFixed(1) + '¢';
+    // Strong YES edge (model above market) → green; strong NO edge → red; tight → muted
+    edgeEl.style.color = edge > 10 ? 'var(--green)' : edge < -10 ? 'var(--red)' : 'var(--muted)';
+    edgeSub.textContent = edge > 10  ? 'YES underpriced ↑'
+                        : edge < -10 ? 'NO underpriced ↓'
+                        : 'market aligned';
+    // Pulse the card when edge is actionable (>10¢ or <-10¢)
+    const edgeCard = document.getElementById('m-edge-card');
+    if (edgeCard) edgeCard.classList.toggle('glow-extreme', Math.abs(edge) > 15);
+  } else {
+    edgeEl.textContent = '—';
+    edgeSub.textContent = 'model vs market';
+  }
 }
 
 // ── Market conditions ────────────────────────────────────────────────────────
@@ -658,6 +693,16 @@ function renderMarketConditions(s) {
     depthEl.style.color = depthSmoothed > 0.15 ? 'var(--green)' : depthSmoothed < -0.15 ? 'var(--red)' : 'var(--muted)';
     document.getElementById('depth-imb-label').textContent =
       depthSmoothed > 0.15 ? 'bid-heavy' : depthSmoothed < -0.15 ? 'ask-heavy' : 'balanced';
+  }
+
+  // Kraken perp basis (30s smoothed)
+  const perpBasis = s.perp_basis_smoothed;
+  const perpEl    = document.getElementById('perp-basis-val');
+  if (perpBasis != null && s.perp_mid > 0) {
+    perpEl.textContent = (perpBasis >= 0 ? '+$' : '-$') + Math.abs(perpBasis).toFixed(0);
+    perpEl.style.color = perpBasis > 80 ? 'var(--green)' : perpBasis < -80 ? 'var(--red)' : 'var(--muted)';
+    document.getElementById('perp-basis-label').textContent =
+      perpBasis > 80 ? 'bull lead' : perpBasis < -80 ? 'bear lead' : 'neutral';
   }
 
 }
@@ -822,6 +867,7 @@ function renderBtc(s) {
   if (exch.coinbase > 0) exchParts.push('CB $' + fmt(exch.coinbase));
   if (exch.kraken   > 0) exchParts.push('KR $' + fmt(exch.kraken));
   if (exch.bitstamp > 0) exchParts.push('BS $' + fmt(exch.bitstamp));
+  if (exch.gemini   > 0) exchParts.push('GE $' + fmt(exch.gemini));
   setVal('fv-exchange-sources', exchParts.length ? exchParts.join('  ·  ') : '—');
 
   if (s.last_resolution_msg) {

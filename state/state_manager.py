@@ -139,7 +139,9 @@ class StateManager:
         starting_bankroll: float = 250.0,
     ):
         # Feed state
-        self._exchange_prices: dict[str, float] = {"coinbase": 0.0, "kraken": 0.0, "bitstamp": 0.0}
+        self._exchange_prices: dict[str, float] = {
+            "coinbase": 0.0, "kraken": 0.0, "bitstamp": 0.0, "gemini": 0.0,
+        }
         self.btc_price: float = 0.0
         self.btc_history: deque[tuple[float, float]] = deque(maxlen=6000)
         self.btc_feed_active: bool = False
@@ -208,6 +210,11 @@ class StateManager:
         # Futures taker buy/sell ratio (Binance Futures — polled every 30 s)
         self.futures_taker_ratio: float = 0.0
         self.futures_taker_ratio_history: deque[tuple[float, float]] = deque(maxlen=12)
+
+        # Kraken PI_XBTUSD perpetual futures — perp basis as a spot lead signal
+        self.perp_mid: float = 0.0
+        self.perp_index: float = 0.0
+        self.perp_basis_history: deque[tuple[float, float]] = deque(maxlen=600)  # 10 min @ ~1/s
 
         # Open interest history (for OI delta — appended in update_open_interest)
         self.oi_history: deque[tuple[float, float]] = deque(maxlen=600)
@@ -531,6 +538,38 @@ class StateManager:
             self.futures_taker_ratio_history.append((time.time(), ratio))
         self._dirty.set()
 
+    async def update_perp_data(self, mid: float, index: float) -> None:
+        async with self._lock:
+            self.perp_mid   = mid
+            self.perp_index = index
+            self.perp_basis_history.append((time.time(), mid - index))
+        self._dirty.set()
+
+    def perp_basis_smoothed(self, window_s: float = 30.0) -> float:
+        """Mean perp basis (mark − index, $) over the last window_s seconds."""
+        history = list(self.perp_basis_history)
+        if not history:
+            return 0.0
+        cutoff = history[-1][0] - window_s
+        recent = [b for ts, b in history if ts >= cutoff]
+        return sum(recent) / len(recent) if recent else 0.0
+
+    def perp_basis_slope(self, window_s: float = 60.0) -> float:
+        """$/s slope of the perp basis over the last window_s seconds.
+        Rising basis → buyers bidding up the perp → incoming spot upward pressure.
+        """
+        history = list(self.perp_basis_history)
+        if len(history) < 5:
+            return 0.0
+        cutoff = history[-1][0] - window_s
+        recent = [(ts, b) for ts, b in history if ts >= cutoff]
+        if len(recent) < 5:
+            return 0.0
+        dt = recent[-1][0] - recent[0][0]
+        if dt < 10.0:
+            return 0.0
+        return (recent[-1][1] - recent[0][1]) / dt
+
     def oi_delta_pct(self, lookback_seconds: float) -> Optional[float]:
         history = list(self.oi_history)
         if len(history) < 2:
@@ -702,6 +741,11 @@ class StateManager:
             # New feeds
             "futures_taker_ratio": self.futures_taker_ratio,
             "futures_taker_ratio_history": list(self.futures_taker_ratio_history)[-12:],
+            "perp_mid": round(self.perp_mid, 2),
+            "perp_index": round(self.perp_index, 2),
+            "perp_basis": round(self.perp_mid - self.perp_index, 2) if self.perp_mid > 0 else 0.0,
+            "perp_basis_smoothed": round(self.perp_basis_smoothed(), 2),
+            "perp_basis_slope": round(self.perp_basis_slope(), 3),
             "binance_depth_imbalance": self.binance_depth_imbalance,
             "binance_depth_smoothed": self.binance_depth_smoothed(),
             "liq_long_2m": round(self.liq_long_2m, 0),

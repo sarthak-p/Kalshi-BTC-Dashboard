@@ -18,7 +18,9 @@ from feeds.bitstamp_feed import BitstampFeed
 from feeds.btc_feed import BtcFeed
 from feeds.futures_taker_feed import FuturesTakerFeed
 from feeds.kalshi_ws import KalshiFeed
+from feeds.gemini_feed import GeminiFeed
 from feeds.kraken_feed import KrakenFeed
+from feeds.kraken_perp_feed import KrakenPerpFeed
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 from strategy.scalper import Analyzer
@@ -40,6 +42,8 @@ async def main() -> None:
     taker_feed    = FuturesTakerFeed(state=state, cfg=settings)
     depth_feed    = BinanceDepthFeed(state=state, cfg=settings)
     liq_feed      = BinanceLiqFeed(state=state, cfg=settings)
+    kraken_perp   = KrakenPerpFeed(state=state, cfg=settings)
+    gemini_feed   = GeminiFeed(state=state, cfg=settings)
     executor      = Executor(state=state, cfg=settings)
     analyzer      = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
 
@@ -72,7 +76,8 @@ async def main() -> None:
         f"\n  Kalshi BTC Dashboard\n"
         f"  Open → http://{settings.dashboard_host}:{settings.dashboard_port}\n"
         f"  Env: {settings.kalshi_env}  |  Series: {settings.btc_series_ticker}\n"
-        f"  BTC feeds: Coinbase + Kraken + Bitstamp (equal-weighted avg)\n"
+        f"  BTC feeds: Coinbase + Kraken + Bitstamp + Gemini (equal-weighted avg)\n"
+        f"  Perp feed: Kraken PI_XBTUSD (basis lead signal)\n"
     )
 
     await asyncio.gather(
@@ -85,6 +90,8 @@ async def main() -> None:
         taker_feed.run(),
         depth_feed.run(),
         liq_feed.run(),
+        kraken_perp.run(),
+        gemini_feed.run(),
         analyzer.run(),
         uv_server.serve(),
     )

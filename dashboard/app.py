@@ -8,6 +8,7 @@ Routes:
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -35,7 +36,6 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     sm = app.state.state_manager
     await websocket.accept()
     sm.register_ws(websocket)
-    import json
     await websocket.send_text(json.dumps(sm.to_dict()))
     try:
         while True:

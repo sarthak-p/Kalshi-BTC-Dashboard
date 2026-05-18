@@ -73,7 +73,9 @@ def fair_value_yes_cents(
     expected_vol_pct = sigma * math.sqrt(tau_seconds / _YEAR_SECONDS)
     if expected_vol_pct <= 0:
         return 100.0 if btc_change >= 0 else 0.0
-    drift_pct = (drift_usd_per_s / btc_open) * tau_seconds
+    # Cap slope projection to 90 s — slopes rarely persist for the full remaining window.
+    # Projecting over full tau inflates GBM unrealistically when 7+ min remain.
+    drift_pct = (drift_usd_per_s / btc_open) * min(tau_seconds, 90.0)
     z = (btc_change_pct + drift_pct) / expected_vol_pct
     return max(5.0, min(95.0, _norm_cdf(z) * 100.0))
 
@@ -172,16 +174,17 @@ def _compute_recommendation(
     binance_depth_smoothed_val: float = 0.0,
     depth_imbalance_threshold: float = 0.15,
     liq_pressure_val: Optional[str] = None,
+    perp_basis: float = 0.0,
 ) -> dict:
     basis = []
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value — 65/35 (asymmetric: YES bar higher to account for faster Kalshi repricing on upside)
-    if fv > 65:
+    # GBM fair-value — 60/40 thresholds (loosened from 65/35 now that drift cap prevents inflation)
+    if fv > 60:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 35:
+    elif fv < 40:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
@@ -229,10 +232,10 @@ def _compute_recommendation(
             basis.append("Technicals: neutral (GBM driving)")
     elif slope_side is not None:
         # Slope may only drive when GBM has moved meaningfully in the same direction.
-        # YES: fv > 60 (primary fires at 65, so slope covers the 60–65 window)
-        # NO:  fv < 40 (primary fires at 35, so slope covers the 35–40 window)
-        gbm_confirms_slope = (slope_side == "YES" and fv > 60.0) or \
-                              (slope_side == "NO"  and fv < 40.0)
+        # YES: fv > 55 (primary fires at 60, so slope covers the 55–60 window)
+        # NO:  fv < 45 (primary fires at 40, so slope covers the 40–45 window)
+        gbm_confirms_slope = (slope_side == "YES" and fv > 55.0) or \
+                              (slope_side == "NO"  and fv < 45.0)
         if gbm_confirms_slope:
             side = slope_side
             if bias_side is not None and bias_side != slope_side:
@@ -362,9 +365,24 @@ def _compute_recommendation(
     else:
         liq_side = None
 
+    # Kraken perp basis — perp premium over spot index as a lead signal
+    # Positive basis = perp trading above spot = institutional buying → bullish lead
+    _PERP_BASIS_THRESHOLD = 50.0  # $50 premium / discount to count as a signal
+    if perp_basis > _PERP_BASIS_THRESHOLD:
+        perp_side: Optional[str] = "YES"
+        basis.append(f"Perp basis: +${perp_basis:.0f} (perp premium → bull lead)")
+    elif perp_basis < -_PERP_BASIS_THRESHOLD:
+        perp_side = "NO"
+        basis.append(f"Perp basis: -${abs(perp_basis):.0f} (perp discount → bear lead)")
+    elif perp_basis != 0.0:
+        perp_side = None
+        basis.append(f"Perp basis: {perp_basis:+.0f} (neutral)")
+    else:
+        perp_side = None
+
     # Count supporting signals that agree with the recommended side (informational)
     supporting = [btc_side, cvd_side, funding_side, imbalance_side, kalshi_momentum_side, slope_side,
-                  taker_side, depth_side, liq_side]
+                  taker_side, depth_side, liq_side, perp_side]
     if side is not None:
         agree_count = sum(1 for s in supporting if s == side)
         disagree_count = sum(1 for s in supporting if s is not None and s != side)
@@ -401,13 +419,13 @@ def _compute_recommendation(
     return {
         "side": side,
         "entry_price": round(entry_price, 1) if entry_price is not None else None,
-        "confidence": round((2 + agree_count) / 7.0, 2) if side else 0.0,
+        "confidence": round((2 + agree_count) / 8.0, 2) if side else 0.0,
         "signal_count": agree_count,
         "basis": basis,
     }
 
 class Analyzer:
-    _LOCK_STABILITY_SECS = 30.0  # signal must hold the same side this long before locking
+    _LOCK_STABILITY_SECS = 15.0  # signal must hold the same side this long before locking
 
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state
@@ -446,8 +464,14 @@ class Analyzer:
         tau_seconds = max(0.0, self.state.window_close_ts - now)
         history = list(self.state.btc_history)
 
-        if self.state.dvol > 0:
-            sigma = self.state.dvol / 100.0   # Deribit DVOL is more stable than realized vol
+        if tau_seconds < 180.0:
+            # Near close: 5-min realized vol is more accurate than 24-h DVOL.
+            # DVOL overestimates short-horizon variance and makes the model too
+            # uncertain at settlement — a $40 swing in 3 min is rare; DVOL implies it isn't.
+            fallback_sigma = (self.state.dvol / 100.0) if self.state.dvol > 0 else self.cfg.btc_sigma
+            sigma = _rolling_realized_vol(history, fallback=fallback_sigma, lookback_s=300.0)
+        elif self.state.dvol > 0:
+            sigma = self.state.dvol / 100.0
         else:
             sigma = _rolling_realized_vol(history, fallback=self.cfg.btc_sigma)
         slope = _btc_slope(history)
@@ -552,6 +576,7 @@ class Analyzer:
             binance_depth_smoothed_val=self.state.binance_depth_smoothed(),
             depth_imbalance_threshold=self.cfg.binance_depth_imbalance_threshold,
             liq_pressure_val=self.state.liq_pressure(),
+            perp_basis=self.state.perp_basis_smoothed(),
         )
 
         if self.state.recommendation["side"] != getattr(self.state, '_last_logged_rec_side', 'UNSET'):
@@ -576,7 +601,6 @@ class Analyzer:
             locked = None
 
         # Break the 60-second flip lock early when GBM crosses the stop-loss threshold.
-        # Tightened to 45/55 so reversals are detected within ~5 GBM points of centre.
         gbm_strongly_opposes = (
             (locked == "YES" and fv <= 45.0) or
             (locked == "NO"  and fv >= 55.0)
@@ -632,17 +656,17 @@ class Analyzer:
                 yes_ask_p = ob.best_ask() or 0.0
                 kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
                 gap = ((fv - kalshi_mid) if raw_side == "YES" else (kalshi_mid - fv)) if kalshi_mid is not None else None
-                if not self.state.signal_snapshot:
-                    self.state.signal_snapshot = {
-                        "side": raw_side,
-                        "fv": round(fv, 1),
-                        "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
-                        "gap": round(gap, 1) if gap is not None else None,
-                    }
-                # Slope must confirm lock direction — flat/opposing slope indicates a wick recovery
-                slope_aligns = (raw_side == "YES" and slope >= 0.05) or \
-                               (raw_side == "NO"  and slope <= -0.05) or \
-                               abs(fv - 50.0) > 25.0  # bypass when GBM already very extreme
+                # Slope must confirm lock direction — flat/opposing slope indicates a wick recovery.
+                # Bypass when: GBM is already extremely committed (|fv-50| > 25),
+                # OR the Kraken perp basis strongly confirms the direction (institutional lead signal).
+                _perp_b = self.state.perp_basis_smoothed()
+                slope_aligns = (
+                    (raw_side == "YES" and slope >= 0.05) or
+                    (raw_side == "NO"  and slope <= -0.05) or
+                    abs(fv - 50.0) > 25.0 or
+                    (raw_side == "YES" and _perp_b > 80.0) or
+                    (raw_side == "NO"  and _perp_b < -80.0)
+                )
                 if not slope_aligns:
                     if not self._slope_suppressed_logged:
                         self._slope_suppressed_logged = True
@@ -656,58 +680,41 @@ class Analyzer:
                             f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<10)"
                         )
                 else:
-                    _oi_d   = self.state.oi_delta_pct(300.0)
-                    _liq_p  = self.state.liq_pressure()
-                    _taker  = self.state.futures_taker_ratio
-                    _depth_s = self.state.binance_depth_smoothed()
-                    _skip = None
-                    if gap is not None and gap > 25.0:
-                        # Kalshi market strongly opposes our model direction.
-                        # Empirically: when |GBM − market mid| > 25¢, model accuracy drops to ~20%.
-                        # The market aggregates BRTI-constituent exchange data we cannot see directly.
-                        _skip = (f"market opposes {raw_side}: Kalshi mid {kalshi_mid:.0f}¢ vs "
-                                 f"GBM {fv:.0f}% (gap +{gap:.1f}¢ > 25¢)")
-                    elif _oi_d is not None and _oi_d < self.cfg.oi_squeeze_threshold_pct and raw_side == "YES":
-                        _skip = (f"OI squeeze {_oi_d:.1f}% < "
-                                 f"{self.cfg.oi_squeeze_threshold_pct:.1f}% (YES blocked)")
-                    elif (_oi_d is not None and _oi_d > -self.cfg.oi_squeeze_threshold_pct
-                          and raw_side == "NO"):
-                        _skip = (f"OI expanding {_oi_d:.1f}% > "
-                                 f"{-self.cfg.oi_squeeze_threshold_pct:.1f}% (NO blocked)")
-                    elif _liq_p == "long_squeeze" and raw_side == "YES":
-                        _skip = (f"long squeeze active — "
-                                 f"liq_long_2m=${self.state.liq_long_2m:.0f} (YES blocked)")
-                    elif _liq_p == "short_squeeze" and raw_side == "NO":
-                        _skip = (f"short squeeze active — "
-                                 f"liq_short_2m=${self.state.liq_short_2m:.0f} (NO blocked)")
-                    elif (_taker > 0.0
-                          and _taker < self.cfg.futures_taker_ratio_low
-                          and raw_side == "YES"):
-                        _skip = (f"taker ratio {_taker:.3f} < "
-                                 f"{self.cfg.futures_taker_ratio_low:.2f} (short-heavy, YES blocked)")
-                    elif (_taker > 0.0
-                          and _taker > self.cfg.futures_taker_ratio_high
-                          and raw_side == "NO"):
-                        _skip = (f"taker ratio {_taker:.3f} > "
-                                 f"{self.cfg.futures_taker_ratio_high:.2f} (long-heavy, NO blocked)")
-                    elif (_depth_s < -self.cfg.binance_depth_imbalance_threshold
-                          and raw_side == "YES"):
-                        _skip = (f"depth imbalance {_depth_s:+.3f} < "
-                                 f"-{self.cfg.binance_depth_imbalance_threshold:.2f} (ask-heavy, YES blocked)")
-                    elif (_depth_s > self.cfg.binance_depth_imbalance_threshold
-                          and raw_side == "NO"):
-                        _skip = (f"depth imbalance {_depth_s:+.3f} > "
-                                 f"+{self.cfg.binance_depth_imbalance_threshold:.2f} (bid-heavy, NO blocked)")
-                    if _skip:
-                        if not self._veto_logged:
-                            self._veto_logged = True
-                            await self.state.log_event(f"⛔ Lock vetoed: {_skip}")
-                    else:
-                        self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
-                        held = now - self._stable_since
-                        await self.state.log_event(
-                            f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  slope={slope:+.2f}/s"
-                        )
+                    self.state.signal_snapshot = {
+                        "side": raw_side,
+                        "fv": round(fv, 1),
+                        "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
+                        "gap": round(gap, 1) if gap is not None else None,
+                    }
+                    self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
+                    held = now - self._stable_since
+                    await self.state.log_event(
+                        f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  slope={slope:+.2f}/s"
+                    )
+
+        # Forced late lock — guarantees a lock every window.
+        # Fires at the 3:00 mark if no lock has happened via the normal path.
+        # Uses the model's own GBM signal (no Kalshi weighting) — accuracy depends entirely
+        # on the corrected GBM (90-s drift cap) rather than following the market.
+        if phase == "entry_open" and not self.state.final_model_locked and tau_seconds < 180.0:
+            forced_side = "YES" if fv >= 50.0 else "NO"
+            yes_bid_p = ob.best_bid() or 0.0
+            yes_ask_p = ob.best_ask() or 0.0
+            kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
+            gap = ((fv - kalshi_mid) if forced_side == "YES" else (kalshi_mid - fv)) \
+                  if kalshi_mid is not None else None
+            # Always overwrite signal_snapshot — forced lock is the final decision.
+            # If a normal lock was vetoed and left a stale snapshot, replace it here.
+            self.state.signal_snapshot = {
+                "side": forced_side,
+                "fv": round(fv, 1),
+                "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
+                "gap": round(gap, 1) if gap is not None else None,
+            }
+            self.state.lock_final_model_decision(forced_side, fv=fv, gap=gap or 0.0)
+            await self.state.log_event(
+                f"⏰ Forced lock: {forced_side}  GBM {fv:.0f}%  {int(tau_seconds)}s remaining"
+            )
 
         if self.executor:
             await self.executor.maybe_trade()
