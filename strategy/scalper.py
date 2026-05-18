@@ -3,7 +3,7 @@ Market analyzer — computes GBM fair-value, technicals, and a trade recommendat
 every tick. No orders are placed; this is a decision-support tool.
 
 Recommendation logic (3-signal vote):
-  1. GBM model  — fv > 60 → YES lean, fv < 40 → NO lean
+  1. GBM model  — fv > 65 → YES lean, fv < 35 → NO lean
   2. BTC move   — |change| > MOMENTUM_ENTRY_USD and direction → bullish/bearish
   3. Tech bias  — pre-window RSI/BB bias: up/down/neutral
 
@@ -177,11 +177,11 @@ def _compute_recommendation(
 
     # ── Primary signals: GBM, slope, technicals ───────────────────────────────
 
-    # GBM fair-value — 60/40 thresholds
-    if fv > 60:
+    # GBM fair-value — 65/35 (asymmetric: YES bar higher to account for faster Kalshi repricing on upside)
+    if fv > 65:
         model_side = "YES"
         basis.append(f"GBM: {fv:.0f}% → UP")
-    elif fv < 40:
+    elif fv < 35:
         model_side = "NO"
         basis.append(f"GBM: {fv:.0f}% → DOWN")
     else:
@@ -229,10 +229,10 @@ def _compute_recommendation(
             basis.append("Technicals: neutral (GBM driving)")
     elif slope_side is not None:
         # Slope may only drive when GBM has moved meaningfully in the same direction.
-        # YES: fv > 55 (primary fires at 60, so slope covers the 55–60 window)
-        # NO:  fv < 45 (primary fires at 40, so slope covers the 40–45 window)
-        gbm_confirms_slope = (slope_side == "YES" and fv > 55.0) or \
-                              (slope_side == "NO"  and fv < 45.0)
+        # YES: fv > 60 (primary fires at 65, so slope covers the 60–65 window)
+        # NO:  fv < 40 (primary fires at 35, so slope covers the 35–40 window)
+        gbm_confirms_slope = (slope_side == "YES" and fv > 60.0) or \
+                              (slope_side == "NO"  and fv < 40.0)
         if gbm_confirms_slope:
             side = slope_side
             if bias_side is not None and bias_side != slope_side:
@@ -407,7 +407,7 @@ def _compute_recommendation(
     }
 
 class Analyzer:
-    _LOCK_STABILITY_SECS = 20.0  # signal must hold the same side this long before locking
+    _LOCK_STABILITY_SECS = 30.0  # signal must hold the same side this long before locking
 
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state
@@ -417,6 +417,7 @@ class Analyzer:
         self._stable_side: Optional[str] = None
         self._stable_since: float = 0.0
         self._slope_suppressed_logged: bool = False
+        self._veto_logged: bool = False
 
     async def run(self) -> None:
         await asyncio.gather(
@@ -460,6 +461,7 @@ class Analyzer:
             self._stable_side = None
             self._stable_since = 0.0
             self._slope_suppressed_logged = False
+            self._veto_logged = False
         elif tau_seconds >= self.cfg.min_entry_window_s:
             phase = "entry_open"
             self.state.lock_entry_prediction()   # freeze on first entry_open tick
@@ -619,10 +621,12 @@ class Analyzer:
                 self._stable_side = raw_side
                 self._stable_since = now
                 self._slope_suppressed_logged = False
+                self._veto_logged = False
             elif raw_side is None:
                 # Signal went neutral — reset stability timer so YES→neutral→YES doesn't accumulate time
                 self._stable_side = None
                 self._stable_since = 0.0
+                self._veto_logged = False
             elif raw_side is not None and (now - self._stable_since) >= self._LOCK_STABILITY_SECS:
                 yes_bid_p = ob.best_bid() or 0.0
                 yes_ask_p = ob.best_ask() or 0.0
@@ -646,9 +650,11 @@ class Analyzer:
                             f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (waiting for alignment)"
                         )
                 elif abs(fv - 50.0) < 10.0:
-                    await self.state.log_event(
-                        f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<10)"
-                    )
+                    if not self._veto_logged:
+                        self._veto_logged = True
+                        await self.state.log_event(
+                            f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<10)"
+                        )
                 else:
                     _oi_d   = self.state.oi_delta_pct(300.0)
                     _liq_p  = self.state.liq_pressure()
@@ -693,7 +699,9 @@ class Analyzer:
                         _skip = (f"depth imbalance {_depth_s:+.3f} > "
                                  f"+{self.cfg.binance_depth_imbalance_threshold:.2f} (bid-heavy, NO blocked)")
                     if _skip:
-                        await self.state.log_event(f"⛔ Lock vetoed: {_skip}")
+                        if not self._veto_logged:
+                            self._veto_logged = True
+                            await self.state.log_event(f"⛔ Lock vetoed: {_skip}")
                     else:
                         self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
                         held = now - self._stable_since
