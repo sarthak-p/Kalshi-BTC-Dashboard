@@ -692,30 +692,6 @@ class Analyzer:
                         f"🔒 Model locked: {raw_side} held {held:.0f}s  GBM {fv:.0f}%  slope={slope:+.2f}/s"
                     )
 
-        # Forced late lock — guarantees a lock every window.
-        # Fires at the 3:00 mark if no lock has happened via the normal path.
-        # Uses the model's own GBM signal (no Kalshi weighting) — accuracy depends entirely
-        # on the corrected GBM (90-s drift cap) rather than following the market.
-        if phase == "entry_open" and not self.state.final_model_locked and tau_seconds < 180.0:
-            forced_side = "YES" if fv >= 50.0 else "NO"
-            yes_bid_p = ob.best_bid() or 0.0
-            yes_ask_p = ob.best_ask() or 0.0
-            kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
-            gap = ((fv - kalshi_mid) if forced_side == "YES" else (kalshi_mid - fv)) \
-                  if kalshi_mid is not None else None
-            # Always overwrite signal_snapshot — forced lock is the final decision.
-            # If a normal lock was vetoed and left a stale snapshot, replace it here.
-            self.state.signal_snapshot = {
-                "side": forced_side,
-                "fv": round(fv, 1),
-                "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
-                "gap": round(gap, 1) if gap is not None else None,
-            }
-            self.state.lock_final_model_decision(forced_side, fv=fv, gap=gap or 0.0)
-            await self.state.log_event(
-                f"⏰ Forced lock: {forced_side}  GBM {fv:.0f}%  {int(tau_seconds)}s remaining"
-            )
-
         if self.executor:
             await self.executor.maybe_trade()
 

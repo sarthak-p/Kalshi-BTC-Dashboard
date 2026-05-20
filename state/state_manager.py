@@ -168,6 +168,7 @@ class StateManager:
 
         # Technicals
         self.pre_window_bias: str = "neutral"
+        self.pre_window_bias_locked: bool = False
         self.tech_rsi: float = 50.0
         self.tech_adx: float = 25.0
         self.tech_bb_position: float = 0.5
@@ -283,6 +284,9 @@ class StateManager:
         # Resolution history (persisted across restarts)
         self.resolution_history: list[str] = _load_resolution_history()
 
+        # Trading mode (set by main.py after executor is chosen)
+        self.trading_mode: str = "paper"
+
         # Logs
         self.event_log: deque[str] = deque(maxlen=200)
         self.last_resolution_msg: str = ""
@@ -378,6 +382,7 @@ class StateManager:
             self.final_model_fv = 50.0
             self.final_model_gap = 0.0
             self.signal_snapshot = {}
+            self.pre_window_bias_locked = False
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:
@@ -386,14 +391,18 @@ class StateManager:
         self._dirty.set()
 
     async def update_technicals(
-        self, rsi: float, adx: float, bb_position: float, bb_width: float, bias: str
+        self, rsi: float, adx: float, bb_position: float, bb_width: float, bias: str,
+        lock: bool = False,
     ) -> None:
         async with self._lock:
             self.tech_rsi = rsi
             self.tech_adx = adx
             self.tech_bb_position = bb_position
             self.tech_bb_width = bb_width
-            self.pre_window_bias = bias
+            if not self.pre_window_bias_locked:
+                self.pre_window_bias = bias
+            if lock:
+                self.pre_window_bias_locked = True
             self.tech_fetched = True
         self._dirty.set()
 
@@ -770,6 +779,7 @@ class StateManager:
             "session_res_pred_correct": self.session_res_pred_correct,
             "session_res_pred_accuracy": self._res_pred_accuracy(lifetime=False),
             # Session
+            "trading_mode": self.trading_mode,
             "session_start_ts": self.session_start_ts,
             "last_resolution_msg": self.last_resolution_msg,
             # Log

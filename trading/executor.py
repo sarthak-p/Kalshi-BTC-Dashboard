@@ -32,11 +32,6 @@ class Executor:
         self._attempted_contract: str | None = None
 
     async def startup(self) -> None:
-        if self.cfg.paper_bankroll_reset > 0:
-            self.state.executor_bankroll          = self.cfg.paper_bankroll_reset
-            self.state.executor_bankroll_original = self.cfg.paper_bankroll_reset
-            self.state.executor_all_time_trades   = 0
-            self.state._save_executor_bankroll()
         await self.state.log_event(
             f"📄 Paper — balance ${self.state.executor_bankroll:.2f}"
         )

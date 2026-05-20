@@ -194,10 +194,9 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `KALSHI_PRIVATE_KEY_B64` | — | Base64-encoded PEM private key |
 | `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract auto-discovery |
 | `BANKROLL` | `250.00` | Starting paper bankroll |
-| `PAPER_BANKROLL_RESET` | `0` | Set to a positive value to reset paper balance on next startup, then set back to 0 |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
-| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window opens when seconds remaining crosses this (8:00 mark) |
-| `MIN_ENTRY_WINDOW_S` | `120.0` | Too-late threshold — entry window closes below this (2:00 mark) |
+| `MAX_ENTRY_WINDOW_S` | `540.0` | Entry window opens when seconds remaining crosses this (9:00 mark) |
+| `MIN_ENTRY_WINDOW_S` | `360.0` | Too-late threshold — entry window closes below this (6:00 mark) |
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike to show as bullish/bearish in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (≈ $18/min) |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |

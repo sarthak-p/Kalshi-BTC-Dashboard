@@ -29,9 +29,9 @@ class Settings(BaseSettings):
 
     # ── Entry-window phase thresholds (for dashboard phase indicator) ─────────
     # Only show "entry open" when this many seconds or fewer remain
-    max_entry_window_s: float = Field(default=480.0, env="MAX_ENTRY_WINDOW_S")
+    max_entry_window_s: float = Field(default=540.0, env="MAX_ENTRY_WINDOW_S")
     # "Too late" threshold
-    min_entry_window_s: float = Field(default=120.0, env="MIN_ENTRY_WINDOW_S")
+    min_entry_window_s: float = Field(default=360.0, env="MIN_ENTRY_WINDOW_S")
 
     # ── Sweet-spot price range (informational — helps pick entry price) ───────
     # min: below this the contract is priced too cheap (early-window ~50¢ is fine)
@@ -87,9 +87,6 @@ class Settings(BaseSettings):
     kalshi_ws_base: str = Field(default="", env="KALSHI_WS_BASE")
 
     bankroll: float = Field(default=250.0, env="BANKROLL")
-    # Set PAPER_BANKROLL_RESET to a positive value to override the persisted paper balance on startup.
-    # Remove or set to 0 after restarting to resume normal persistence.
-    paper_bankroll_reset: float = Field(default=0.0, env="PAPER_BANKROLL_RESET")
 
 
     def model_post_init(self, __context) -> None:
