@@ -425,7 +425,7 @@ def _compute_recommendation(
     }
 
 class Analyzer:
-    _LOCK_STABILITY_SECS = 30.0  # signal must hold the same side this long before locking
+    _LOCK_STABILITY_SECS = 20.0  # signal must hold the same side this long before locking
 
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state
@@ -544,6 +544,7 @@ class Analyzer:
         self.state.analysis.update({
             "phase": phase,
             "fv": round(fv, 1),
+            "slope": round(slope, 3),
             "side": side,
             "btc_move_ok": abs(btc_change) >= self.cfg.momentum_entry_usd,
             "price_in_range": price_in_range,
@@ -685,6 +686,7 @@ class Analyzer:
                         "fv": round(fv, 1),
                         "market_mid": round(kalshi_mid, 1) if kalshi_mid is not None else None,
                         "gap": round(gap, 1) if gap is not None else None,
+                        "slope": round(slope, 3),
                     }
                     self.state.lock_final_model_decision(raw_side, fv=fv, gap=gap or 0.0)
                     held = now - self._stable_since
@@ -883,6 +885,7 @@ class Analyzer:
             "signal_fv":               snap.get("fv", ""),
             "signal_market_mid":       snap.get("market_mid", ""),
             "signal_gap":              snap.get("gap", ""),
+            "signal_slope":            snap.get("slope", ""),
             "market_mid_at_close":     round(market_mid_at_close, 1) if market_mid_at_close is not None else "",
         })
 

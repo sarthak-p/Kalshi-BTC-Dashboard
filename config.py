@@ -29,9 +29,9 @@ class Settings(BaseSettings):
 
     # ── Entry-window phase thresholds (for dashboard phase indicator) ─────────
     # Only show "entry open" when this many seconds or fewer remain
-    max_entry_window_s: float = Field(default=540.0, env="MAX_ENTRY_WINDOW_S")
+    max_entry_window_s: float = Field(default=480.0, env="MAX_ENTRY_WINDOW_S")
     # "Too late" threshold
-    min_entry_window_s: float = Field(default=360.0, env="MIN_ENTRY_WINDOW_S")
+    min_entry_window_s: float = Field(default=120.0, env="MIN_ENTRY_WINDOW_S")
 
     # ── Sweet-spot price range (informational — helps pick entry price) ───────
     # min: below this the contract is priced too cheap (early-window ~50¢ is fine)

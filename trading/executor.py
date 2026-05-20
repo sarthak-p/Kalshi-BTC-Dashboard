@@ -8,9 +8,9 @@ from __future__ import annotations
 from config import Settings
 from state.state_manager import StateManager
 
-_BASE_SIZE_USD = 100.0
+_BASE_SIZE_USD = 150.0
 _MAX_SIZE_USD  = 200.0
-_MIN_SIZE_USD  = 50.0
+_MIN_SIZE_USD  = 100.0
 
 
 def _calc_size_usd(gap_cents: float, signal_count: int) -> float:
@@ -79,6 +79,21 @@ class Executor:
                 self._attempted_contract = contract
                 await self.state.log_event(
                     f"⏭ Skipped {target_side} — GBM reversed to {current_fv:.0f}¢"
+                )
+                return
+
+        # Skip if slope is now strongly opposing the locked direction.
+        # Threshold 0.10 $/s — clear directional signal, not noise.
+        current_slope = self.state.analysis.get("slope")
+        if current_slope is not None:
+            slope_opposes = (
+                (target_side == "YES" and current_slope < -0.10) or
+                (target_side == "NO"  and current_slope >  0.10)
+            )
+            if slope_opposes:
+                self._attempted_contract = contract
+                await self.state.log_event(
+                    f"⏭ Skipped {target_side} — slope opposing at execution: {current_slope:+.3f}/s"
                 )
                 return
 

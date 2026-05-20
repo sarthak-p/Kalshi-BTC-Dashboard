@@ -22,7 +22,7 @@ Kalshi settles using CF Benchmarks' BRTI — a volume-weighted average of Coinba
 1. **GBM fair value** — if GBM > 60% → YES; if GBM < 40% → NO
 2. **BTC slope** — if GBM neutral and |slope| ≥ 0.30 $/s and GBM confirms (> 55% for YES, < 45% for NO) → slope drives
 3. **Technical bias=down** — if GBM+slope both neutral and GBM < 40% → NO
-4. **No signal** → no trade (but see forced lock below)
+4. **No signal** → no trade
 
 `bias=up` is never a standalone trade trigger — informational only.
 
@@ -32,17 +32,17 @@ The GBM model uses current BTC velocity (slope) as a drift term to shift the fai
 
 ### Trade lifecycle
 
-**Lock** fires when all of the following hold simultaneously inside the entry window (8:00–2:00 mark):
+**Lock** fires when all of the following hold simultaneously inside the entry window (9:00–2:00 mark):
 
-1. The raw signal has held the **same side for 15 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
+1. The raw signal has held the **same side for 30 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
 2. Slope confirms lock direction (`slope ≥ 0.05` for YES, `slope ≤ −0.05` for NO). **Bypassed** when |GBM − 50| > 25 (model already extremely confident), or when the Kraken perp basis strongly confirms the direction (basis > $80 for YES, < −$80 for NO).
 3. |GBM − 50| ≥ 10 (conviction guard — no coin-flip locks).
 
-**Forced late lock** — if no lock has fired by the **3:00 mark** (180 s remaining), the model locks unconditionally based purely on GBM direction: GBM ≥ 50% → YES, GBM < 50% → NO. No gates are applied. This guarantees a lock every window; accuracy depends entirely on the GBM model rather than market pricing.
+
 
 **Flip suppression** — once a side locks in the recommendation, it holds for 60 seconds before flipping. Early unlock when GBM crosses 45% (YES locked) or 55% (NO locked), indicating a genuine reversal.
 
-**Fill** — simulated at the current best ask (YES) or `100 − best bid` (NO) at execution time.
+**Fill** — simulated at the current best ask (YES) or `100 − best bid` (NO) at execution time. Position size is dynamic: base $150, scaled by GBM-market gap and confirming signal count, capped at $100–$200.
 
 **Settlement** — at window close the position is marked won/lost based on the official Kalshi result.
 
@@ -196,7 +196,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `BANKROLL` | `250.00` | Starting paper bankroll |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
 | `MAX_ENTRY_WINDOW_S` | `540.0` | Entry window opens when seconds remaining crosses this (9:00 mark) |
-| `MIN_ENTRY_WINDOW_S` | `360.0` | Too-late threshold — entry window closes below this (6:00 mark) |
+| `MIN_ENTRY_WINDOW_S` | `120.0` | Too-late threshold — entry window closes below this (2:00 mark) |
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike to show as bullish/bearish in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (≈ $18/min) |
 | `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
@@ -233,7 +233,7 @@ The live dashboard at `http://127.0.0.1:8000` displays:
 - **BTC Slope** — weighted $/s velocity over 90s and 300s windows
 - **CVD** — cumulative volume delta from Coinbase trade stream (net buy BTC since window open)
 - **Depth Imbalance** — 30-second smoothed top-10 bid/ask quantity imbalance (−1 to +1)
-- **Perp Basis** — Kraken PI_XBTUSD mark − index (30 s smoothed); green when > +$80 (bull lead), red when < −$80 (bear lead)
+- **Perp Basis** — Kraken PI_XBTUSD mark − index (30 s smoothed); fires as informational signal at ±$50; green/bull-lead coloring at > +$80, red/bear-lead coloring at < −$80 (also the slope-gate bypass threshold)
 - **Funding Rate** — OKX perp funding rate (informational)
 - Recommendation panel with lock confidence block (GBM at lock time + gap vs market)
 - BTC sparkline with window-open strike line
@@ -259,4 +259,4 @@ KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CO
 - **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract. At 40¢ entry, round-trip taker cost is ~1.7¢ per contract. Not deducted from paper sizing.
 - **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
 - **GBM sigma source.** Uses Deribit DVOL (implied vol) when tau > 3 min. Switches to 5-min rolling realized vol when tau < 3 min — DVOL overestimates short-horizon variance and makes the model too uncertain near settlement.
-- **Perp basis lead signal.** Kraken PI_XBTUSD basis (mark − index) is smoothed over 30 seconds. A sustained premium > $80 bypasses the slope gate for YES locks (and vice-versa for discounts and NO). Informational below $80.
+- **Perp basis lead signal.** Kraken PI_XBTUSD basis (mark − index) is smoothed over 30 seconds. Acts as an informational supporting signal when |basis| > $50. A sustained premium > $80 additionally bypasses the slope-confirmation gate for YES locks (and vice-versa for discounts and NO locks).
