@@ -674,11 +674,11 @@ class Analyzer:
                         await self.state.log_event(
                             f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (waiting for alignment)"
                         )
-                elif abs(fv - 50.0) < 10.0:
+                elif abs(fv - 50.0) < 15.0:
                     if not self._veto_logged:
                         self._veto_logged = True
                         await self.state.log_event(
-                            f"⛔ Lock skipped: GBM {fv:.0f}% no conviction (|fv−50|<10)"
+                            f"⛔ Lock skipped: GBM {fv:.0f}% below strong tier (|fv−50|<15)"
                         )
                 else:
                     self.state.signal_snapshot = {

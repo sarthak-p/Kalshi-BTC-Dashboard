@@ -34,9 +34,9 @@ The GBM model uses current BTC velocity (slope) as a drift term to shift the fai
 
 **Lock** fires when all of the following hold simultaneously inside the entry window (9:00–2:00 mark):
 
-1. The raw signal has held the **same side for 30 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
+1. The raw signal has held the **same side for 20 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
 2. Slope confirms lock direction (`slope ≥ 0.05` for YES, `slope ≤ −0.05` for NO). **Bypassed** when |GBM − 50| > 25 (model already extremely confident), or when the Kraken perp basis strongly confirms the direction (basis > $80 for YES, < −$80 for NO).
-3. |GBM − 50| ≥ 10 (conviction guard — no coin-flip locks).
+3. |GBM − 50| ≥ 15 (strong tier required — fv must be above 65% or below 35%).
 
 
 
@@ -195,7 +195,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract auto-discovery |
 | `BANKROLL` | `250.00` | Starting paper bankroll |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
-| `MAX_ENTRY_WINDOW_S` | `540.0` | Entry window opens when seconds remaining crosses this (9:00 mark) |
+| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window opens when seconds remaining crosses this (8:00 mark) |
 | `MIN_ENTRY_WINDOW_S` | `120.0` | Too-late threshold — entry window closes below this (2:00 mark) |
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike to show as bullish/bearish in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (≈ $18/min) |

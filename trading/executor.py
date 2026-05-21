@@ -10,7 +10,7 @@ from state.state_manager import StateManager
 
 _BASE_SIZE_USD = 150.0
 _MAX_SIZE_USD  = 200.0
-_MIN_SIZE_USD  = 100.0
+_MIN_SIZE_USD  = 500.0
 
 
 def _calc_size_usd(gap_cents: float, signal_count: int) -> float:
