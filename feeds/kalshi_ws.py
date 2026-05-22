@@ -256,6 +256,10 @@ class KalshiFeed:
             ob.top_yes_bid = _parse_price_cents(bid_str)
         if ask_str is not None:
             ob.top_yes_ask = _parse_price_cents(ask_str)
+        # If bid > ask the ask is stale (market makers withdrew offers).
+        if ob.top_yes_bid is not None and ob.top_yes_ask is not None:
+            if ob.top_yes_bid >= ob.top_yes_ask:
+                ob.top_yes_ask = None
         self._ob = ob
         await self.state.update_orderbook(deepcopy(self._ob))
 

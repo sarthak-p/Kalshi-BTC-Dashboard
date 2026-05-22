@@ -5,12 +5,14 @@ Fills are simulated at the current market price (best ask for YES, 100−best_bi
 """
 from __future__ import annotations
 
+import time
+
 from config import Settings
 from state.state_manager import StateManager
 
 _BASE_SIZE_USD = 150.0
 _MAX_SIZE_USD  = 200.0
-_MIN_SIZE_USD  = 500.0
+_MIN_SIZE_USD  = 100.0
 
 
 def _calc_size_usd(gap_cents: float, signal_count: int) -> float:
@@ -36,6 +38,40 @@ class Executor:
             f"📄 Paper — balance ${self.state.executor_bankroll:.2f}"
         )
 
+    async def maybe_stop_loss(self) -> None:
+        pos = self.state.position
+        if pos["status"] != "open":
+            return
+
+        contract = pos["ticker"]
+        if contract != self.state.active_contract:
+            return
+
+        # Only exit when there's meaningful time left — inside 3 min the market
+        # has largely priced the outcome and last-minute BTC spikes are common.
+        tau = max(0.0, self.state.window_close_ts - time.time())
+        if tau <= 180.0:
+            return
+
+        side = pos["side"]
+        ob   = self.state.orderbook
+
+        if side == "YES":
+            current_value = ob.best_bid()
+        else:
+            yes_ask = ob.best_ask()
+            current_value = (100.0 - yes_ask) if yes_ask is not None else None
+
+        if current_value is None or current_value > 35.0:
+            return
+
+        await self.state.log_event(
+            f"🛑 Stop-loss: {side} dropped to {current_value:.0f}¢  "
+            f"({tau/60:.1f} min left) — closing to limit loss"
+        )
+        await self._paper_close(contract, pos)
+        self._attempted_contract = contract  # prevent re-entry this window
+
     async def maybe_trade(self) -> None:
         contract = self.state.active_contract
         if not contract:
@@ -56,6 +92,10 @@ class Executor:
         ob = self.state.orderbook
         if target_side == "YES":
             price = ob.best_ask()
+            # Stale ask: market makers withdrew — ask below bid means no real liquidity
+            bid = ob.best_bid()
+            if price is not None and bid is not None and price <= bid:
+                price = None
         else:
             yes_bid = ob.best_bid()
             price = (100.0 - yes_bid) if yes_bid is not None else None

@@ -695,6 +695,7 @@ class Analyzer:
                     )
 
         if self.executor:
+            await self.executor.maybe_stop_loss()
             await self.executor.maybe_trade()
 
         self.state._dirty.set()
