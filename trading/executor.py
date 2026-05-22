@@ -56,7 +56,7 @@ class Executor:
             yes_ask = ob.best_ask()
             current_value = (100.0 - yes_ask) if yes_ask is not None else None
 
-        if current_value is None or current_value > 35.0:
+        if current_value is None or current_value > 40.0:
             return
 
         await self.state.log_event(

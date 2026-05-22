@@ -680,6 +680,16 @@ class Analyzer:
                         await self.state.log_event(
                             f"⛔ Lock skipped: GBM {fv:.0f}% below strong tier (|fv−50|<15)"
                         )
+                elif not (
+                    (raw_side == "YES" and self.state.prediction_locked_yes_pct >= 50.0) or
+                    (raw_side == "NO"  and self.state.prediction_locked_yes_pct <= 50.0)
+                ):
+                    if not self._veto_logged:
+                        self._veto_logged = True
+                        await self.state.log_event(
+                            f"⛔ Lock skipped: {raw_side} reversal trade — "
+                            f"early-window GBM {self.state.prediction_locked_yes_pct:.0f}% opposed direction"
+                        )
                 else:
                     self.state.signal_snapshot = {
                         "side": raw_side,
