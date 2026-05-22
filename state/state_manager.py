@@ -137,7 +137,9 @@ class StateManager:
         self,
         momentum_threshold_usd: float = 150.0,
         starting_bankroll: float = 250.0,
+        live_mode: bool = False,
     ):
+        self._live_mode = live_mode
         # Feed state
         self._exchange_prices: dict[str, float] = {
             "coinbase": 0.0, "kraken": 0.0, "bitstamp": 0.0, "gemini": 0.0,
@@ -275,9 +277,14 @@ class StateManager:
             "pnl":        None,
         }
         # Executor P&L tracking
-        self.executor_bankroll_original: float = starting_bankroll   # set by loader below
-        self.executor_all_time_trades: int = 0                       # set by loader below
-        self.executor_bankroll: float = self._load_executor_bankroll(default=starting_bankroll)
+        self.executor_bankroll_original: float = starting_bankroll
+        self.executor_all_time_trades: int = 0
+        # Live mode: balance comes from Kalshi on startup — never read/write the file.
+        # Paper mode: persist balance across restarts via executor_bankroll.json.
+        if live_mode:
+            self.executor_bankroll: float = 0.0  # overwritten by LiveExecutor.startup()
+        else:
+            self.executor_bankroll = self._load_executor_bankroll(default=starting_bankroll)
         self.executor_session_pnl: float = 0.0
         self.executor_session_trades: int = 0
 
@@ -439,6 +446,8 @@ class StateManager:
             return default
 
     def _save_executor_bankroll(self) -> None:
+        if self._live_mode:
+            return  # balance is owned by Kalshi; do not overwrite the paper file
         try:
             _EXECUTOR_BANKROLL_FILE.parent.mkdir(parents=True, exist_ok=True)
             _EXECUTOR_BANKROLL_FILE.write_text(json.dumps({
@@ -478,9 +487,11 @@ class StateManager:
             pnl = round(pos["contracts"] - pos["cost"], 2) if won else round(-pos["cost"], 2)
             pos["status"] = "won" if won else "lost"
             pos["pnl"]    = pnl
-            self.executor_bankroll     = round(self.executor_bankroll + pnl, 2)
-            self.executor_session_pnl  = round(self.executor_session_pnl + pnl, 2)
-            self._save_executor_bankroll()
+            self.executor_session_pnl = round(self.executor_session_pnl + pnl, 2)
+            if not self._live_mode:
+                # Live: Kalshi owns the balance; the 30-s sync loop updates it.
+                self.executor_bankroll = round(self.executor_bankroll + pnl, 2)
+                self._save_executor_bankroll()
             # Clear the lock so maybe_trade can't fire a second buy after settlement
             self.final_model_locked   = False
             self.final_model_side     = None
@@ -499,9 +510,11 @@ class StateManager:
             pnl      = round(proceeds - pos["cost"], 2)
             pos["status"] = "stopped"
             pos["pnl"]    = pnl
-            self.executor_bankroll    = round(self.executor_bankroll + pnl, 2)
             self.executor_session_pnl = round(self.executor_session_pnl + pnl, 2)
-            self._save_executor_bankroll()
+            if not self._live_mode:
+                # Live: Kalshi owns the balance; the 30-s sync loop updates it.
+                self.executor_bankroll = round(self.executor_bankroll + pnl, 2)
+                self._save_executor_bankroll()
         self._dirty.set()
 
     def lock_entry_prediction(self) -> None:

@@ -25,6 +25,7 @@ from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 from strategy.scalper import Analyzer
 from trading.executor import Executor
+from trading.live_executor import LiveExecutor
 
 
 async def main() -> None:
@@ -32,6 +33,7 @@ async def main() -> None:
     state   = StateManager(
         momentum_threshold_usd=settings.momentum_threshold_usd,
         starting_bankroll=settings.bankroll,
+        live_mode=(settings.trading_mode == "live"),
     )
     app.state.state_manager = state
 
@@ -44,11 +46,17 @@ async def main() -> None:
     liq_feed      = BinanceLiqFeed(state=state, cfg=settings)
     kraken_perp   = KrakenPerpFeed(state=state, cfg=settings)
     gemini_feed   = GeminiFeed(state=state, cfg=settings)
-    executor      = Executor(state=state, cfg=settings)
+
+    if settings.trading_mode == "live":
+        executor: Executor = LiveExecutor(state=state, cfg=settings)
+    else:
+        executor = Executor(state=state, cfg=settings)
+
     analyzer      = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
 
     await state.log_event(
         f"Dashboard started — env={settings.kalshi_env}  "
+        f"mode={settings.trading_mode}  "
         f"momentum=${settings.momentum_entry_usd:.0f}  "
         f"bankroll=${state.executor_bankroll:.2f}"
     )
@@ -76,6 +84,7 @@ async def main() -> None:
         f"\n  Kalshi BTC Dashboard\n"
         f"  Open → http://{settings.dashboard_host}:{settings.dashboard_port}\n"
         f"  Env: {settings.kalshi_env}  |  Series: {settings.btc_series_ticker}\n"
+        f"  Mode: {settings.trading_mode.upper()}\n"
         f"  BTC feeds: Coinbase + Kraken + Bitstamp + Gemini (equal-weighted avg)\n"
         f"  Perp feed: Kraken PI_XBTUSD (basis lead signal)\n"
     )

@@ -10,28 +10,22 @@ import time
 from config import Settings
 from state.state_manager import StateManager
 
-_BASE_SIZE_USD = 150.0
-_MAX_SIZE_USD  = 200.0
-_MIN_SIZE_USD  = 100.0
-
-
-def _calc_size_usd(gap_cents: float, signal_count: int) -> float:
-    """Scale position size by GBM-market gap and confirming signal breadth.
-
-    gap_cents=20, signal_count=5 → $100 (base).
-    Wide gap + many confirmers → up to $200; narrow gap + few → floor at $50.
-    """
-    gap_factor    = gap_cents / 20.0
-    signal_factor = max(0.5, min(1.0, signal_count / 5.0))
-    raw = _BASE_SIZE_USD * gap_factor * signal_factor
-    return max(_MIN_SIZE_USD, min(_MAX_SIZE_USD, round(raw, 2)))
-
-
 class Executor:
+    # Position sizing — override these in subclasses for different modes.
+    _BASE_SIZE_USD: float = 150.0
+    _MAX_SIZE_USD:  float = 200.0
+    _MIN_SIZE_USD:  float = 100.0
+
     def __init__(self, state: StateManager, cfg: Settings):
         self.state = state
         self.cfg   = cfg
         self._attempted_contract: str | None = None
+
+    def _calc_size_usd(self, gap_cents: float, signal_count: int) -> float:
+        gap_factor    = gap_cents / 20.0
+        signal_factor = max(0.5, min(1.0, signal_count / 5.0))
+        raw = self._BASE_SIZE_USD * gap_factor * signal_factor
+        return max(self._MIN_SIZE_USD, min(self._MAX_SIZE_USD, round(raw, 2)))
 
     async def startup(self) -> None:
         await self.state.log_event(
@@ -47,10 +41,10 @@ class Executor:
         if contract != self.state.active_contract:
             return
 
-        # Only exit when there's meaningful time left — inside 3 min the market
+        # Only exit when there's meaningful time left — inside 2 min the market
         # has largely priced the outcome and last-minute BTC spikes are common.
         tau = max(0.0, self.state.window_close_ts - time.time())
-        if tau <= 180.0:
+        if tau <= 120.0:
             return
 
         side = pos["side"]
@@ -139,13 +133,13 @@ class Executor:
 
         gap          = self.state.final_model_gap
         signal_count = self.state.recommendation.get("signal_count", 0)
-        size_usd     = _calc_size_usd(gap, signal_count)
+        size_usd     = self._calc_size_usd(gap, signal_count)
         n_contracts  = max(1, int(size_usd / (price / 100.0)))
         await self._paper_fill(contract, target_side, n_contracts, price, size_usd, gap, signal_count)
 
     async def _paper_fill(
         self, ticker: str, side: str, contracts: int, fill_price: float,
-        size_usd: float = _BASE_SIZE_USD, gap: float = 0.0, signal_count: int = 0,
+        size_usd: float = 0.0, gap: float = 0.0, signal_count: int = 0,
     ) -> None:
         cost = round(contracts * fill_price / 100.0, 2)
         await self.state.open_position(ticker, side, contracts, fill_price, "paper")

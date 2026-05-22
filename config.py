@@ -12,6 +12,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # ── Trading mode ─────────────────────────────────────────────────────────
+    trading_mode: Literal["paper", "live"] = Field(default="paper", env="TRADING_MODE")
+
     # ── Kalshi ──────────────────────────────────────────────────────────────
     kalshi_env: Literal["demo", "prod"] = Field(env="KALSHI_ENV")
     kalshi_api_key_id: str = Field(default="", env="KALSHI_API_KEY_ID")
