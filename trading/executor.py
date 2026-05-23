@@ -4,8 +4,7 @@ Trade executor — follows the model recommendation and places paper orders.
 Fills are simulated at the current market price (best ask for YES, 100−best_bid for NO).
 """
 from __future__ import annotations
-
-import time
+import asyncio
 
 from config import Settings
 from state.state_manager import StateManager
@@ -41,12 +40,6 @@ class Executor:
         if contract != self.state.active_contract:
             return
 
-        # Only exit when there's meaningful time left — inside 2 min the market
-        # has largely priced the outcome and last-minute BTC spikes are common.
-        tau = max(0.0, self.state.window_close_ts - time.time())
-        if tau <= 120.0:
-            return
-
         side = pos["side"]
         ob   = self.state.orderbook
 
@@ -61,7 +54,7 @@ class Executor:
 
         await self.state.log_event(
             f"🛑 Stop-loss: {side} dropped to {current_value:.0f}¢  "
-            f"({tau/60:.1f} min left) — closing to limit loss"
+            f"— closing to limit loss"
         )
         await self._paper_close(contract, pos)
         self._attempted_contract = contract  # prevent re-entry this window
@@ -151,19 +144,45 @@ class Executor:
 
     async def _paper_close(self, ticker: str, pos: dict) -> None:
         side = pos["side"]
-        ob   = self.state.orderbook
-        if side == "YES":
-            sell_price = ob.best_bid()
-        else:
-            yes_ask    = ob.best_ask()
-            sell_price = (100.0 - yes_ask) if yes_ask is not None else None
+        yes_price = 1 if side == "YES" else 99  # sell at any available bid
 
-        if sell_price is None:
-            sell_price = pos["fill_price"]
+        sell_confirmed = False
+        for attempt in range(1, 5):
+            order_id = await self._place_order(
+                "sell", ticker, side, pos["contracts"], yes_price,
+                reduce_only=True, time_in_force="immediate_or_cancel",
+            )
+            if order_id is None:
+                await self.state.log_event(f"❌ Live sell failed (attempt {attempt}/4)")
+                if attempt < 4:
+                    await asyncio.sleep(1.0)
+                continue
+
+            await asyncio.sleep(0.2)  # let IoC settle
+            filled = await self._check_order_filled(order_id)
+            if filled:
+                sell_confirmed = True
+                break
+            if attempt < 4:
+                await self.state.log_event(f"⚠ Sell retry {attempt}/4")
+                await asyncio.sleep(1.0)
+
+        if not sell_confirmed:
+            await self.state.log_event("❌ Live sell failed after 4 attempts — position may still be open")
+            return
+
+        ob = self.state.orderbook
+        if side == "YES":
+            sell_price = ob.best_bid() or pos["fill_price"]
+        else:
+            yes_ask = ob.best_ask()
+            sell_price = (100.0 - yes_ask) if yes_ask is not None else pos["fill_price"]
 
         await self.state.stop_position(ticker, sell_price)
         pnl = self.state.position["pnl"]
         await self.state.log_event(
-            f"🔄 Closed {side}  {pos['contracts']} × {pos['fill_price']:.1f}¢ "
-            f"→ {sell_price:.1f}¢  PnL ${pnl:+.2f}  balance ${self.state.executor_bankroll:.2f}"
+            f"🔴 LIVE Closed {side}  {pos['contracts']}×{pos['fill_price']:.1f}¢"
+            f" → {sell_price:.1f}¢  PnL ${pnl:+.2f}  "
+            f"balance ${self.state.executor_bankroll:.2f}"
         )
+        await self._sync_balance()

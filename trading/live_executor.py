@@ -88,28 +88,32 @@ class LiveExecutor(Executor):
 
     async def _paper_close(self, ticker: str, pos: dict) -> None:
         side = pos["side"]
-        ob = self.state.orderbook
+        yes_price = 1 if side == "YES" else 99  # sell at any available bid
 
+        attempt = 0
+        while True:
+            attempt += 1
+            order_id = await self._place_order(
+                "sell", ticker, side, pos["contracts"], yes_price,
+                reduce_only=True, time_in_force="immediate_or_cancel",
+            )
+            if order_id is None:
+                await self.state.log_event(f"❌ Live sell order error (attempt {attempt})")
+            else:
+                await asyncio.sleep(0.2)
+
+            still_open = await self._has_open_position(ticker)
+            if not still_open:
+                break
+            await self.state.log_event(f"⚠ Sell retry {attempt} — position still open")
+            await asyncio.sleep(1.0)
+
+        ob = self.state.orderbook
         if side == "YES":
-            sell_price = ob.best_bid()
+            sell_price = ob.best_bid() or pos["fill_price"]
         else:
             yes_ask = ob.best_ask()
-            sell_price = (100.0 - yes_ask) if yes_ask is not None else None
-
-        if sell_price is None:
-            sell_price = pos["fill_price"]
-
-        yes_price = _to_yes_price(side, sell_price)
-        order_id = await self._place_order("sell", ticker, side, pos["contracts"], yes_price)
-        if order_id is None:
-            await self.state.log_event(f"❌ Live sell order failed: {side}")
-            return
-
-        filled = await self._await_fill(order_id)
-        if not filled:
-            await self._cancel_order(order_id)
-            await self.state.log_event(f"❌ Live sell timed out — cancelled")
-            return
+            sell_price = (100.0 - yes_ask) if yes_ask is not None else pos["fill_price"]
 
         await self.state.stop_position(ticker, sell_price)
         pnl = self.state.position["pnl"]
@@ -119,11 +123,12 @@ class LiveExecutor(Executor):
             f"balance ${self.state.executor_bankroll:.2f}"
         )
         await self._sync_balance()
-
+        
     # ── Kalshi REST helpers ───────────────────────────────────────────────────
 
     async def _place_order(
-        self, action: str, ticker: str, side: str, count: int, yes_price: int
+        self, action: str, ticker: str, side: str, count: int, yes_price: int,
+        reduce_only: bool = False, time_in_force: str | None = None,
     ) -> Optional[str]:
         url = self.cfg.kalshi_rest_base + "/portfolio/orders"
         path = urlparse(url).path
@@ -137,6 +142,10 @@ class LiveExecutor(Executor):
             "type": "limit",
             "yes_price": yes_price,
         }
+        if reduce_only:
+            body["reduce_only"] = True
+        if time_in_force:
+            body["time_in_force"] = time_in_force
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, headers=headers, json=body)
@@ -175,6 +184,19 @@ class LiveExecutor(Executor):
                 await client.delete(url, headers=headers)
         except Exception:
             pass
+
+    async def _has_open_position(self, ticker: str) -> bool:
+        url = self.cfg.kalshi_rest_base + f"/portfolio/positions?ticker={ticker}"
+        path = urlparse(url).path
+        try:
+            headers = _make_rest_headers(self.cfg, "GET", path)
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                positions = resp.json().get("market_positions", [])
+                return any(abs(p.get("position", 0)) > 0 for p in positions)
+        except Exception:
+            return True  # assume still open on error, so we keep retrying
 
     async def _fetch_kalshi_balance(self) -> Optional[float]:
         url = self.cfg.kalshi_rest_base + "/portfolio/balance"
