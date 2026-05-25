@@ -45,21 +45,6 @@ class EventLogger:
         async with self._lock:
             self._buffer.append(row)
 
-    _BIAS_FIELDS: list[str] = [
-        "date_utc", "ticker", "bias_15m", "bias_10m", "bias_5m", "resolution",
-    ]
-
-    def log_bias_snapshot(self, data: dict[str, Any]) -> None:
-        """Append one row to the bias-vs-resolution tracking log (synchronous)."""
-        LOG_DIR.mkdir(exist_ok=True)
-        bias_csv = LOG_DIR / "bias_snapshots.csv"
-        write_header = not bias_csv.exists()
-        with open(bias_csv, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=self._BIAS_FIELDS, extrasaction="ignore")
-            if write_header:
-                writer.writeheader()
-            writer.writerow(data)
-
     def log_prediction(self, data: dict[str, Any]) -> None:
         """Append one row to the persistent cross-session predictions log (synchronous)."""
         LOG_DIR.mkdir(exist_ok=True)

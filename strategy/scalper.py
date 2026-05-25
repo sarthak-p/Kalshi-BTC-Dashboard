@@ -494,15 +494,6 @@ class Analyzer:
         else:
             phase = "closing"
 
-        # Bias snapshots — capture once per window at each threshold
-        bias_now = self.state.pre_window_bias
-        if tau_seconds <= 900.0 and not self.state.bias_snap_15m:
-            self.state.bias_snap_15m = bias_now
-        if tau_seconds <= 600.0 and not self.state.bias_snap_10m:
-            self.state.bias_snap_10m = bias_now
-        if tau_seconds <= 300.0 and not self.state.bias_snap_5m:
-            self.state.bias_snap_5m = bias_now
-
         btc_change = btc - btc_open
         side = "yes" if btc_change > 0 else "no"
 
@@ -736,7 +727,8 @@ class Analyzer:
         )
         if bias is not None:
             await self.state.update_technicals(
-                bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias
+                bias.rsi, bias.adx, bias.bb_position, bias.bb_width, bias.bias,
+                lock=not self.state.pre_window_bias_locked,
             )
             await self.logger.log("technicals", {
                 "rsi": bias.rsi,
@@ -789,9 +781,6 @@ class Analyzer:
                 final_model_side=self.state.final_model_side,
                 signal_snapshot=dict(self.state.signal_snapshot),
                 market_mid_at_close=self.state.orderbook.mid(),
-                bias_snap_15m=self.state.bias_snap_15m,
-                bias_snap_10m=self.state.bias_snap_10m,
-                bias_snap_5m=self.state.bias_snap_5m,
             ))
 
     async def _settle_window(
@@ -806,9 +795,6 @@ class Analyzer:
         final_model_side: Optional[str] = None,
         signal_snapshot: dict = None,
         market_mid_at_close: Optional[float] = None,
-        bias_snap_15m: str = "",
-        bias_snap_10m: str = "",
-        bias_snap_5m: str = "",
     ) -> None:
         """
         Poll Kalshi's settlement API for the official result.
@@ -913,16 +899,6 @@ class Analyzer:
             "signal_gap":              snap.get("gap", ""),
             "signal_slope":            snap.get("slope", ""),
             "market_mid_at_close":     round(market_mid_at_close, 1) if market_mid_at_close is not None else "",
-        })
-
-        # ── Bias snapshot log ─────────────────────────────────────────────────────
-        self.logger.log_bias_snapshot({
-            "date_utc":   datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-            "ticker":     ticker,
-            "bias_15m":   bias_snap_15m or "—",
-            "bias_10m":   bias_snap_10m or "—",
-            "bias_5m":    bias_snap_5m  or "—",
-            "resolution": resolution,
         })
 
         # ── Accuracy tracking ─────────────────────────────────────────────────────
