@@ -171,6 +171,11 @@ class StateManager:
         # Technicals
         self.pre_window_bias: str = "neutral"
         self.pre_window_bias_locked: bool = False
+
+        # Bias snapshots at 15m / 10m / 5m remaining
+        self.bias_snap_15m: str = ""
+        self.bias_snap_10m: str = ""
+        self.bias_snap_5m: str = ""
         self.tech_rsi: float = 50.0
         self.tech_adx: float = 25.0
         self.tech_bb_position: float = 0.5
@@ -390,6 +395,9 @@ class StateManager:
             self.final_model_gap = 0.0
             self.signal_snapshot = {}
             self.pre_window_bias_locked = False
+            self.bias_snap_15m = ""
+            self.bias_snap_10m = ""
+            self.bias_snap_5m  = ""
         self._dirty.set()
 
     async def set_btc_open(self, price: float) -> None:

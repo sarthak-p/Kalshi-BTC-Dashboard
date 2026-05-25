@@ -1,10 +1,10 @@
 """
 Live trade executor — places real orders on Kalshi via the REST API.
 
-Mirrors the paper Executor exactly: same entry logic, same stop-loss threshold,
-same position sizing, same wick/slope guards.  The only difference is that
-_paper_fill and _paper_close place and await real Kalshi limit orders instead
-of simulating fills at the current market price.
+On lock: places a limit buy at min(current_ask, 75¢) and holds it for the
+entire entry window. Polls for fill every 2 seconds. Cancels automatically
+when the entry window closes (phase leaves entry_open). The 75¢ ceiling
+ensures positive EV at the measured ~77% accuracy.
 
 Balance is fetched from Kalshi on startup and re-synced every 30 s (and after
 every fill/close) so the dashboard always reflects the real account balance.
@@ -24,20 +24,29 @@ import httpx
 from config import Settings
 from feeds.kalshi_ws import _make_rest_headers
 from state.state_manager import StateManager
-from trading.executor import Executor
+from trading.executor import Executor, _MAX_ENTRY_PRICE
 
-_FILL_TIMEOUT_S   = 10.0   # seconds to wait for a limit order to execute
-_FILL_POLL_S      = 0.5    # poll interval while waiting
-_BALANCE_SYNC_S   = 30.0   # periodic balance sync interval
+_BALANCE_SYNC_S = 30.0
+_ORDER_POLL_S   = 2.0   # how often to poll Kalshi for limit order fill status
 
 
 class LiveExecutor(Executor):
-    """Real-money executor.  Subclasses Executor; overrides fill/close only."""
+    """Real-money executor. Subclasses Executor; overrides entry and close."""
 
-    # Live position sizing — tune these independently of paper mode.
-    _BASE_SIZE_USD: float = 15.0
-    _MAX_SIZE_USD:  float = 20.0
-    _MIN_SIZE_USD:  float = 10.0
+    _BASE_SIZE_USD: float = 10.0
+    _MAX_SIZE_USD:  float = 15.0
+    _MIN_SIZE_USD:  float = 5.0
+
+    def __init__(self, state: StateManager, cfg: Settings):
+        super().__init__(state, cfg)
+        self._pending_order_id:    Optional[str] = None
+        self._pending_contract:    Optional[str] = None
+        self._pending_side:        Optional[str] = None
+        self._pending_n:           int   = 0
+        self._pending_price:       float = 0.0
+        self._pending_gap:         float = 0.0
+        self._pending_signal_count: int  = 0
+        self._last_poll_ts:        float = 0.0
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
@@ -49,42 +58,102 @@ class LiveExecutor(Executor):
         )
         asyncio.ensure_future(self._balance_sync_loop())
 
-    # ── Fill / close overrides ────────────────────────────────────────────────
+    # ── Entry override ────────────────────────────────────────────────────────
 
-    async def _paper_fill(
-        self,
-        ticker: str,
-        side: str,
-        contracts: int,
-        fill_price: float,
-        size_usd: float = 150.0,
-        gap: float = 0.0,
-        signal_count: int = 0,
-    ) -> None:
-        yes_price = _to_yes_price(side, fill_price)
-        order_id = await self._place_order("buy", ticker, side, contracts, yes_price)
+    async def maybe_trade(self) -> None:
+        contract = self.state.active_contract
+
+        # Cancel stale pending order when contract changes
+        if self._pending_order_id and self._pending_contract != contract:
+            await self._cancel_order(self._pending_order_id)
+            self._clear_pending()
+
+        # Manage existing pending order for the current contract
+        if self._pending_order_id:
+            await self._manage_pending_order()
+            return
+
+        # Run all entry guards
+        entry = await self._prepare_trade()
+        if entry is None:
+            return
+
+        # Place limit at ceiling or better
+        limit_price = min(entry["price"], _MAX_ENTRY_PRICE)
+        n_contracts = max(1, int(entry["size_usd"] / (limit_price / 100.0)))
+        yes_price   = _to_yes_price(entry["side"], limit_price)
+
+        order_id = await self._place_order(
+            "buy", entry["contract"], entry["side"], n_contracts, yes_price
+        )
         if order_id is None:
             await self.state.log_event(
-                f"❌ Live order failed: {side} {contracts}×{fill_price:.1f}¢"
+                f"❌ Limit order failed: {entry['side']} {n_contracts}×{limit_price:.0f}¢"
             )
             return
 
-        filled = await self._await_fill(order_id)
-        if not filled:
-            await self._cancel_order(order_id)
-            await self.state.log_event(
-                f"❌ Live order timed out ({side} {contracts}×{fill_price:.1f}¢) — cancelled"
-            )
-            return
-
-        cost = round(contracts * fill_price / 100.0, 2)
-        await self.state.open_position(ticker, side, contracts, fill_price, "live")
+        self._pending_order_id     = order_id
+        self._pending_contract     = entry["contract"]
+        self._pending_side         = entry["side"]
+        self._pending_n            = n_contracts
+        self._pending_price        = limit_price
+        self._pending_gap          = entry["gap"]
+        self._pending_signal_count = entry["signal_count"]
+        self._last_poll_ts         = time.monotonic()
         await self.state.log_event(
-            f"🟢 LIVE {side}  {contracts}×{fill_price:.1f}¢  cost ${cost:.2f}  "
-            f"[gap {gap:+.1f}¢  sigs {signal_count}]  "
-            f"balance ${self.state.executor_bankroll:.2f}"
+            f"⏳ {entry['side']} limit {n_contracts}×{limit_price:.0f}¢ placed"
+            f"  [gap {entry['gap']:+.1f}¢  sigs {entry['signal_count']}]"
+        )
+
+    async def _manage_pending_order(self) -> None:
+        # Cancel when the entry window has closed
+        phase = self.state.analysis.get("phase")
+        if phase not in ("entry_open",):
+            contract = self._pending_contract
+            await self._cancel_order(self._pending_order_id)
+            await self.state.log_event(
+                f"⏳ {self._pending_side} limit cancelled — window closing"
+            )
+            self._clear_pending()
+            self._attempted_contract = contract
+            return
+
+        # Poll for fill every _ORDER_POLL_S seconds
+        now = time.monotonic()
+        if now - self._last_poll_ts < _ORDER_POLL_S:
+            return
+        self._last_poll_ts = now
+
+        if not await self._check_order_filled(self._pending_order_id):
+            return
+
+        # Confirmed fill — record position
+        contract = self._pending_contract
+        cost = round(self._pending_n * self._pending_price / 100.0, 2)
+        await self.state.open_position(
+            contract, self._pending_side, self._pending_n, self._pending_price, "live"
+        )
+        await self.state.log_event(
+            f"🟢 LIVE {self._pending_side}  {self._pending_n}×{self._pending_price:.1f}¢"
+            f"  cost ${cost:.2f}  [gap {self._pending_gap:+.1f}¢"
+            f"  sigs {self._pending_signal_count}]"
+            f"  balance ${self.state.executor_bankroll:.2f}"
         )
         await self._sync_balance()
+        self._attempted_contract = contract
+        self._clear_pending()
+
+    def _clear_pending(self) -> None:
+        self._pending_order_id     = None
+        self._pending_contract     = None
+        self._pending_side         = None
+        self._pending_n            = 0
+        self._pending_price        = 0.0
+        self._pending_gap          = 0.0
+        self._pending_signal_count = 0
+        self._last_poll_ts         = 0.0
+
+    # ── Close override ────────────────────────────────────────────────────────
 
     async def _paper_close(self, ticker: str, pos: dict) -> None:
         side = pos["side"]
@@ -123,24 +192,24 @@ class LiveExecutor(Executor):
             f"balance ${self.state.executor_bankroll:.2f}"
         )
         await self._sync_balance()
-        
+
     # ── Kalshi REST helpers ───────────────────────────────────────────────────
 
     async def _place_order(
         self, action: str, ticker: str, side: str, count: int, yes_price: int,
         reduce_only: bool = False, time_in_force: str | None = None,
     ) -> Optional[str]:
-        url = self.cfg.kalshi_rest_base + "/portfolio/orders"
+        url  = self.cfg.kalshi_rest_base + "/portfolio/orders"
         path = urlparse(url).path
         headers = _make_rest_headers(self.cfg, "POST", path)
         body = {
-            "action": action,
+            "action":          action,
             "client_order_id": str(uuid.uuid4()),
-            "count": count,
-            "side": side.lower(),
-            "ticker": ticker,
-            "type": "limit",
-            "yes_price": yes_price,
+            "count":           count,
+            "side":            side.lower(),
+            "ticker":          ticker,
+            "type":            "limit",
+            "yes_price":       yes_price,
         }
         if reduce_only:
             body["reduce_only"] = True
@@ -155,28 +224,20 @@ class LiveExecutor(Executor):
             await self.state.log_event(f"❌ Order API error: {exc}")
             return None
 
-    async def _await_fill(self, order_id: str) -> bool:
-        url = self.cfg.kalshi_rest_base + f"/portfolio/orders/{order_id}"
+    async def _check_order_filled(self, order_id: str) -> bool:
+        url  = self.cfg.kalshi_rest_base + f"/portfolio/orders/{order_id}"
         path = urlparse(url).path
-        deadline = time.monotonic() + _FILL_TIMEOUT_S
-        while time.monotonic() < deadline:
-            try:
-                headers = _make_rest_headers(self.cfg, "GET", path)
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    resp = await client.get(url, headers=headers)
-                    resp.raise_for_status()
-                    status = resp.json().get("order", {}).get("status", "")
-                if status == "executed":
-                    return True
-                if status in ("canceled", "cancelled"):
-                    return False
-            except Exception:
-                pass
-            await asyncio.sleep(_FILL_POLL_S)
-        return False
+        try:
+            headers = _make_rest_headers(self.cfg, "GET", path)
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                return resp.json().get("order", {}).get("status", "") == "executed"
+        except Exception:
+            return False
 
     async def _cancel_order(self, order_id: str) -> None:
-        url = self.cfg.kalshi_rest_base + f"/portfolio/orders/{order_id}"
+        url  = self.cfg.kalshi_rest_base + f"/portfolio/orders/{order_id}"
         path = urlparse(url).path
         headers = _make_rest_headers(self.cfg, "DELETE", path)
         try:
@@ -186,7 +247,7 @@ class LiveExecutor(Executor):
             pass
 
     async def _has_open_position(self, ticker: str) -> bool:
-        url = self.cfg.kalshi_rest_base + f"/portfolio/positions?ticker={ticker}"
+        url  = self.cfg.kalshi_rest_base + f"/portfolio/positions?ticker={ticker}"
         path = urlparse(url).path
         try:
             headers = _make_rest_headers(self.cfg, "GET", path)
@@ -196,17 +257,16 @@ class LiveExecutor(Executor):
                 positions = resp.json().get("market_positions", [])
                 return any(abs(p.get("position", 0)) > 0 for p in positions)
         except Exception:
-            return True  # assume still open on error, so we keep retrying
+            return True  # assume still open on error — keep retrying
 
     async def _fetch_kalshi_balance(self) -> Optional[float]:
-        url = self.cfg.kalshi_rest_base + "/portfolio/balance"
+        url  = self.cfg.kalshi_rest_base + "/portfolio/balance"
         path = urlparse(url).path
         headers = _make_rest_headers(self.cfg, "GET", path)
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
-                # Kalshi returns balance in cents
                 cents = resp.json().get("balance", 0)
                 return round(cents / 100.0, 2)
         except Exception as exc:
@@ -231,12 +291,7 @@ class LiveExecutor(Executor):
 
 
 def _to_yes_price(side: str, price: float) -> int:
-    """Convert internal price (¢) to the Kalshi yes_price integer.
-
-    Kalshi always uses yes_price to represent the YES leg regardless of which
-    side you're trading.  For YES orders, yes_price == the price we pay/receive.
-    For NO orders, yes_price == 100 - (price we pay/receive for NO).
-    """
+    """Convert internal price (¢) to the Kalshi yes_price integer."""
     if side == "YES":
         return int(round(price))
     return int(round(100.0 - price))

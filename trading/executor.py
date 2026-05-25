@@ -1,13 +1,17 @@
 """
 Trade executor — follows the model recommendation and places paper orders.
 
-Fills are simulated at the current market price (best ask for YES, 100−best_bid for NO).
+Fills are simulated at the current market price (best ask for YES, 100−best_bid for NO),
+subject to a 75¢ ceiling (_MAX_ENTRY_PRICE). If the ask exceeds the ceiling the trade
+is skipped that tick and retried on the next, simulating a resting limit order.
 """
 from __future__ import annotations
 import asyncio
 
 from config import Settings
 from state.state_manager import StateManager
+
+_MAX_ENTRY_PRICE: float = 75.0
 
 class Executor:
     # Position sizing — override these in subclasses for different modes.
@@ -49,37 +53,37 @@ class Executor:
             yes_ask = ob.best_ask()
             current_value = (100.0 - yes_ask) if yes_ask is not None else None
 
-        if current_value is None or current_value > 40.0:
+        if current_value is None or current_value > 20.0:
             return
 
         await self.state.log_event(
-            f"🛑 Stop-loss: {side} dropped to {current_value:.0f}¢  "
+            f"🛑 Stop-loss: {side} dropped to {current_value:.1f}¢  "
             f"— closing to limit loss"
         )
         await self._paper_close(contract, pos)
         self._attempted_contract = contract  # prevent re-entry this window
 
-    async def maybe_trade(self) -> None:
+    async def _prepare_trade(self) -> dict | None:
+        """Run all entry guards. Returns entry params if ready to trade, None to skip."""
         contract = self.state.active_contract
         if not contract:
             self._attempted_contract = None
-            return
+            return None
 
         if contract == self._attempted_contract:
-            return
+            return None
         if not self.state.final_model_locked:
-            return
+            return None
         if self.state.final_model_contract != contract:
-            return
+            return None
 
         target_side = self.state.final_model_side
         if not target_side:
-            return
+            return None
 
         ob = self.state.orderbook
         if target_side == "YES":
             price = ob.best_ask()
-            # Stale ask: market makers withdrew — ask below bid means no real liquidity
             bid = ob.best_bid()
             if price is not None and bid is not None and price <= bid:
                 price = None
@@ -88,17 +92,16 @@ class Executor:
             price = (100.0 - yes_bid) if yes_bid is not None else None
 
         if not price:
-            return
+            return None
 
         pos = self.state.position
         in_contract = pos["status"] == "open" and pos["ticker"] == contract
 
         if in_contract and pos["side"] == target_side:
-            return
+            return None
         if in_contract and pos["side"] != target_side:
             await self._paper_close(contract, pos)
 
-        # Skip if GBM has reversed significantly since the lock (intracandle wick guard).
         current_fv = self.state.analysis.get("fv")
         if current_fv is not None:
             if (target_side == "NO" and current_fv > 55.0) or \
@@ -107,10 +110,8 @@ class Executor:
                 await self.state.log_event(
                     f"⏭ Skipped {target_side} — GBM reversed to {current_fv:.0f}¢"
                 )
-                return
+                return None
 
-        # Skip if slope is now strongly opposing the locked direction.
-        # Threshold 0.10 $/s — clear directional signal, not noise.
         current_slope = self.state.analysis.get("slope")
         if current_slope is not None:
             slope_opposes = (
@@ -122,13 +123,36 @@ class Executor:
                 await self.state.log_event(
                     f"⏭ Skipped {target_side} — slope opposing at execution: {current_slope:+.3f}/s"
                 )
-                return
+                return None
 
         gap          = self.state.final_model_gap
         signal_count = self.state.recommendation.get("signal_count", 0)
         size_usd     = self._calc_size_usd(gap, signal_count)
-        n_contracts  = max(1, int(size_usd / (price / 100.0)))
-        await self._paper_fill(contract, target_side, n_contracts, price, size_usd, gap, signal_count)
+
+        return {
+            "contract":     contract,
+            "side":         target_side,
+            "price":        price,
+            "gap":          gap,
+            "signal_count": signal_count,
+            "size_usd":     size_usd,
+        }
+
+    async def maybe_trade(self) -> None:
+        entry = await self._prepare_trade()
+        if entry is None:
+            return
+
+        price = entry["price"]
+        if price > _MAX_ENTRY_PRICE:
+            return  # retry next tick — simulates resting limit order
+
+        n_contracts = max(1, int(entry["size_usd"] / (price / 100.0)))
+        await self._paper_fill(
+            entry["contract"], entry["side"], n_contracts, price,
+            entry["size_usd"], entry["gap"], entry["signal_count"],
+        )
+        self._attempted_contract = entry["contract"]
 
     async def _paper_fill(
         self, ticker: str, side: str, contracts: int, fill_price: float,

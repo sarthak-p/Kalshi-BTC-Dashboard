@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # min: below this the contract is priced too cheap (early-window ~50¢ is fine)
     # max: above this the risk/reward is bad (paying 85¢ to win 15¢)
     min_entry_price_cents: float = Field(default=30.0, env="MIN_ENTRY_PRICE_CENTS")
-    max_entry_price_cents: float = Field(default=85.0, env="MAX_ENTRY_PRICE_CENTS")
+    max_entry_price_cents: float = Field(default=75.0, env="MAX_ENTRY_PRICE_CENTS")
 
     # ── BTC momentum threshold for recommendation ─────────────────────────────
     momentum_entry_usd: float = Field(default=20.0, env="MOMENTUM_ENTRY_USD")

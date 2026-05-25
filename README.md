@@ -37,12 +37,20 @@ The GBM model uses current BTC velocity (slope) as a drift term to shift the fai
 1. The raw signal has held the **same side for 20 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
 2. Slope confirms lock direction (`slope ≥ 0.05` for YES, `slope ≤ −0.05` for NO). **Bypassed** when |GBM − 50| > 25 (model already extremely confident), or when the Kraken perp basis strongly confirms the direction (basis > $80 for YES, < −$80 for NO).
 3. |GBM − 50| ≥ 15 (strong tier required — fv must be above 65% or below 35%).
-
-
+4. **Reversal guard** — early-window GBM (captured at entry window open) must be ≥ 40% for a YES lock, ≤ 60% for a NO lock. Prevents trading whipsaws where BTC started strongly on the wrong side then reversed.
 
 **Flip suppression** — once a side locks in the recommendation, it holds for 60 seconds before flipping. Early unlock when GBM crosses 45% (YES locked) or 55% (NO locked), indicating a genuine reversal.
 
-**Fill** — simulated at the current best ask (YES) or `100 − best bid` (NO) at execution time. Position size is dynamic: base $150, scaled by GBM-market gap and confirming signal count, capped at $100–$200.
+**Entry** — on lock, a **limit order is placed at `min(current ask, 75¢)`** and held open for the entire entry window. The bot polls for fill every 2 seconds. If the order hasn't filled by the 2:00 mark (window closes), it is cancelled and no trade is taken that window. This ensures the bot never pays more than 75¢, which is the EV break-even at ~77% accuracy:
+
+```
+Buy at 75¢: EV = (0.77 × 25¢) − (0.23 × 40¢) = +11¢/contract  (stop at 35¢)
+Buy at 80¢: EV = (0.77 × 20¢) − (0.23 × 45¢) =  +5¢/contract  (stop at 35¢)
+```
+
+Position size is dynamic: base $15 live / $150 paper, scaled by GBM-market gap and confirming signal count, capped at $10–$20 live / $100–$200 paper.
+
+**Stop-loss** — checked every 50 ms. If position value drops to **≤ 35¢** (YES bid for YES positions, `100 − YES ask` for NO positions), the position is closed immediately with an IoC market sell. Worst-case loss at 75¢ entry capped at 40¢/contract.
 
 **Settlement** — at window close the position is marked won/lost based on the official Kalshi result.
 
