@@ -2,8 +2,12 @@
 Trade executor — follows the model recommendation and places paper orders.
 
 Fills are simulated at the current market price (best ask for YES, 100−best_bid for NO),
-subject to a 75¢ ceiling (_MAX_ENTRY_PRICE). If the ask exceeds the ceiling the trade
+subject to an 80¢ ceiling (_MAX_ENTRY_PRICE). If the ask exceeds the ceiling the trade
 is skipped that tick and retried on the next, simulating a resting limit order.
+
+Position sizing uses half-Kelly: f* = 0.5 × (p_true − p_market) / (1 − p_market),
+where p_true is the historically measured model accuracy (80%), not GBM fair value.
+Capped at _MAX_BANKROLL_FRACTION per trade. Trades with no positive edge are skipped.
 """
 from __future__ import annotations
 import asyncio
@@ -11,24 +15,31 @@ import asyncio
 from config import Settings
 from state.state_manager import StateManager
 
-_MAX_ENTRY_PRICE: float = 75.0
+_MAX_ENTRY_PRICE: float = 80.0
+_KELLY_FRACTION: float = 0.5          # half-Kelly multiplier
+_MAX_BANKROLL_FRACTION: float = 0.20  # hard cap: never risk more than 20% per trade
+_MODEL_ACCURACY_FALLBACK: float = 0.80  # used only if no resolved locks exist yet
 
 class Executor:
-    # Position sizing — override these in subclasses for different modes.
-    _BASE_SIZE_USD: float = 150.0
-    _MAX_SIZE_USD:  float = 200.0
-    _MIN_SIZE_USD:  float = 100.0
-
     def __init__(self, state: StateManager, cfg: Settings):
         self.state = state
         self.cfg   = cfg
         self._attempted_contract: str | None = None
+        self._kelly_skip_logged:  str | None = None
 
-    def _calc_size_usd(self, gap_cents: float, signal_count: int) -> float:
-        gap_factor    = gap_cents / 20.0
-        signal_factor = max(0.5, min(1.0, signal_count / 5.0))
-        raw = self._BASE_SIZE_USD * gap_factor * signal_factor
-        return max(self._MIN_SIZE_USD, min(self._MAX_SIZE_USD, round(raw, 2)))
+    def _get_p_market(self, side: str, taker_price: float, ob) -> float:
+        return taker_price / 100.0
+
+    def _calc_kelly_size(self, p_true: float, p_market: float) -> tuple[float, float]:
+        """Return (size_usd, kelly_pct) using half-Kelly.
+        Returns (0.0, 0.0) when there is no positive edge.
+        """
+        if p_market >= 1.0 or p_true <= p_market:
+            return 0.0, 0.0
+        kelly = (p_true - p_market) / (1.0 - p_market)
+        fraction = min(kelly * _KELLY_FRACTION, _MAX_BANKROLL_FRACTION)
+        size = round(fraction * self.state.executor_bankroll, 2)
+        return size, round(fraction * 100.0, 1)
 
     async def startup(self) -> None:
         await self.state.log_event(
@@ -125,17 +136,26 @@ class Executor:
                 )
                 return None
 
-        gap          = self.state.final_model_gap
-        signal_count = self.state.recommendation.get("signal_count", 0)
-        size_usd     = self._calc_size_usd(gap, signal_count)
+        p_true = self.state._res_pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
+        p_market = self._get_p_market(target_side, price, ob)
+        fv       = self.state.final_model_fv
+        size_usd, kelly_pct = self._calc_kelly_size(p_true, p_market)
+
+        if size_usd <= 0:
+            if self._kelly_skip_logged != contract:
+                self._kelly_skip_logged = contract
+                await self.state.log_event(
+                    f"⏭ No Kelly edge {target_side} (fv {fv:.0f}¢, market {price:.0f}¢) — retrying"
+                )
+            return None  # don't lock out window — retry each tick in case market pulls back
 
         return {
-            "contract":     contract,
-            "side":         target_side,
-            "price":        price,
-            "gap":          gap,
-            "signal_count": signal_count,
-            "size_usd":     size_usd,
+            "contract":  contract,
+            "side":      target_side,
+            "price":     price,
+            "gap":       self.state.final_model_gap,
+            "kelly_pct": kelly_pct,
+            "size_usd":  size_usd,
         }
 
     async def maybe_trade(self) -> None:
@@ -150,51 +170,24 @@ class Executor:
         n_contracts = max(1, int(entry["size_usd"] / (price / 100.0)))
         await self._paper_fill(
             entry["contract"], entry["side"], n_contracts, price,
-            entry["size_usd"], entry["gap"], entry["signal_count"],
+            entry["size_usd"], entry["gap"], entry["kelly_pct"],
         )
         self._attempted_contract = entry["contract"]
 
     async def _paper_fill(
         self, ticker: str, side: str, contracts: int, fill_price: float,
-        size_usd: float = 0.0, gap: float = 0.0, signal_count: int = 0,
+        size_usd: float = 0.0, gap: float = 0.0, kelly_pct: float = 0.0,
     ) -> None:
         cost = round(contracts * fill_price / 100.0, 2)
         await self.state.open_position(ticker, side, contracts, fill_price, "paper")
         await self.state.log_event(
             f"📄 {side}  {contracts} × {fill_price:.1f}¢  cost ${cost:.2f}  "
-            f"[size ${size_usd:.0f}  gap {gap:+.1f}¢  sigs {signal_count}]  "
+            f"[{kelly_pct:.1f}% Kelly = ${size_usd:.0f}  gap {gap:+.1f}¢]  "
             f"balance ${self.state.executor_bankroll:.2f}"
         )
 
     async def _paper_close(self, ticker: str, pos: dict) -> None:
         side = pos["side"]
-        yes_price = 1 if side == "YES" else 99  # sell at any available bid
-
-        sell_confirmed = False
-        for attempt in range(1, 5):
-            order_id = await self._place_order(
-                "sell", ticker, side, pos["contracts"], yes_price,
-                reduce_only=True, time_in_force="immediate_or_cancel",
-            )
-            if order_id is None:
-                await self.state.log_event(f"❌ Live sell failed (attempt {attempt}/4)")
-                if attempt < 4:
-                    await asyncio.sleep(1.0)
-                continue
-
-            await asyncio.sleep(0.2)  # let IoC settle
-            filled = await self._check_order_filled(order_id)
-            if filled:
-                sell_confirmed = True
-                break
-            if attempt < 4:
-                await self.state.log_event(f"⚠ Sell retry {attempt}/4")
-                await asyncio.sleep(1.0)
-
-        if not sell_confirmed:
-            await self.state.log_event("❌ Live sell failed after 4 attempts — position may still be open")
-            return
-
         ob = self.state.orderbook
         if side == "YES":
             sell_price = ob.best_bid() or pos["fill_price"]
@@ -205,8 +198,5 @@ class Executor:
         await self.state.stop_position(ticker, sell_price)
         pnl = self.state.position["pnl"]
         await self.state.log_event(
-            f"🔴 LIVE Closed {side}  {pos['contracts']}×{pos['fill_price']:.1f}¢"
-            f" → {sell_price:.1f}¢  PnL ${pnl:+.2f}  "
             f"balance ${self.state.executor_bankroll:.2f}"
         )
-        await self._sync_balance()

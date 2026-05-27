@@ -33,20 +33,25 @@ _ORDER_POLL_S   = 2.0   # how often to poll Kalshi for limit order fill status
 class LiveExecutor(Executor):
     """Real-money executor. Subclasses Executor; overrides entry and close."""
 
-    _BASE_SIZE_USD: float = 10.0
-    _MAX_SIZE_USD:  float = 15.0
-    _MIN_SIZE_USD:  float = 5.0
-
     def __init__(self, state: StateManager, cfg: Settings):
         super().__init__(state, cfg)
-        self._pending_order_id:    Optional[str] = None
-        self._pending_contract:    Optional[str] = None
-        self._pending_side:        Optional[str] = None
-        self._pending_n:           int   = 0
-        self._pending_price:       float = 0.0
-        self._pending_gap:         float = 0.0
-        self._pending_signal_count: int  = 0
-        self._last_poll_ts:        float = 0.0
+        self._pending_order_id:  Optional[str] = None
+        self._pending_contract:  Optional[str] = None
+        self._pending_side:      Optional[str] = None
+        self._pending_n:         int   = 0
+        self._pending_price:     float = 0.0
+        self._pending_gap:       float = 0.0
+        self._pending_kelly_pct: float = 0.0
+        self._last_poll_ts:      float = 0.0
+
+    def _get_p_market(self, side: str, taker_price: float, ob) -> float:
+        if side == "YES":
+            bid = ob.best_bid()
+            maker = (bid + 1) if bid is not None else taker_price
+        else:
+            yes_ask = ob.best_ask()
+            maker = ((100.0 - yes_ask) + 1) if yes_ask is not None else taker_price
+        return min(maker, taker_price) / 100.0
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
@@ -78,8 +83,30 @@ class LiveExecutor(Executor):
         if entry is None:
             return
 
-        # Place limit at ceiling or better
-        limit_price = min(entry["price"], _MAX_ENTRY_PRICE)
+        # Post as maker at bid+1 — best position on the book, zero fees
+        ob   = self.state.orderbook
+        side = entry["side"]
+
+        large_gap = abs(entry["gap"]) >= 15.0
+
+        if side == "YES":
+            bid         = ob.best_bid()
+            ask         = ob.best_ask()
+            if bid is not None and ask is not None:
+                limit_price = ask if large_gap else min(bid + 1, ask - 1)
+            else:
+                limit_price = entry["price"]
+        else:
+            yes_bid     = ob.best_bid()
+            yes_ask     = ob.best_ask()
+            if yes_bid is not None and yes_ask is not None:
+                no_ask      = 100.0 - yes_bid
+                no_bid      = 100.0 - yes_ask
+                limit_price = no_ask if large_gap else min(no_bid + 1, no_ask - 1)
+            else:
+                limit_price = entry["price"]
+
+        limit_price = min(limit_price, _MAX_ENTRY_PRICE)
         n_contracts = max(1, int(entry["size_usd"] / (limit_price / 100.0)))
         yes_price   = _to_yes_price(entry["side"], limit_price)
 
@@ -92,17 +119,17 @@ class LiveExecutor(Executor):
             )
             return
 
-        self._pending_order_id     = order_id
-        self._pending_contract     = entry["contract"]
-        self._pending_side         = entry["side"]
-        self._pending_n            = n_contracts
-        self._pending_price        = limit_price
-        self._pending_gap          = entry["gap"]
-        self._pending_signal_count = entry["signal_count"]
-        self._last_poll_ts         = time.monotonic()
+        self._pending_order_id  = order_id
+        self._pending_contract  = entry["contract"]
+        self._pending_side      = entry["side"]
+        self._pending_n         = n_contracts
+        self._pending_price     = limit_price
+        self._pending_gap       = entry["gap"]
+        self._pending_kelly_pct = entry["kelly_pct"]
+        self._last_poll_ts      = time.monotonic()
         await self.state.log_event(
-            f"⏳ {entry['side']} limit {n_contracts}×{limit_price:.0f}¢ placed"
-            f"  [gap {entry['gap']:+.1f}¢  sigs {entry['signal_count']}]"
+            f"⏳ {entry['side']} maker limit {n_contracts}×{limit_price:.0f}¢"
+            f"  [{entry['kelly_pct']:.1f}% Kelly  gap {entry['gap']:+.1f}¢]"
         )
 
     async def _manage_pending_order(self) -> None:
@@ -135,8 +162,7 @@ class LiveExecutor(Executor):
         )
         await self.state.log_event(
             f"🟢 LIVE {self._pending_side}  {self._pending_n}×{self._pending_price:.1f}¢"
-            f"  cost ${cost:.2f}  [gap {self._pending_gap:+.1f}¢"
-            f"  sigs {self._pending_signal_count}]"
+            f"  cost ${cost:.2f}  [{self._pending_kelly_pct:.1f}% Kelly  gap {self._pending_gap:+.1f}¢]"
             f"  balance ${self.state.executor_bankroll:.2f}"
         )
         await self._sync_balance()
@@ -144,14 +170,14 @@ class LiveExecutor(Executor):
         self._clear_pending()
 
     def _clear_pending(self) -> None:
-        self._pending_order_id     = None
-        self._pending_contract     = None
-        self._pending_side         = None
-        self._pending_n            = 0
-        self._pending_price        = 0.0
-        self._pending_gap          = 0.0
-        self._pending_signal_count = 0
-        self._last_poll_ts         = 0.0
+        self._pending_order_id  = None
+        self._pending_contract  = None
+        self._pending_side      = None
+        self._pending_n         = 0
+        self._pending_price     = 0.0
+        self._pending_gap       = 0.0
+        self._pending_kelly_pct = 0.0
+        self._last_poll_ts      = 0.0
 
     # ── Close override ────────────────────────────────────────────────────────
 
