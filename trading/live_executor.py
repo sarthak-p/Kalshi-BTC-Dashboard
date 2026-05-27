@@ -108,7 +108,7 @@ class LiveExecutor(Executor):
 
         # Recalculate Kelly at the actual limit price — _prepare_trade sized using the
         # maker price (bid+1), but large_gap trades fill at the taker price (ask).
-        p_true   = self.state._res_pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
+        p_true   = self.state._pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
         size_usd, kelly_pct = self._calc_kelly_size(p_true, limit_price / 100.0)
         if size_usd <= 0:
             self._kelly_log(

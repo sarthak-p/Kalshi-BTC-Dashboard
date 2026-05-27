@@ -111,7 +111,7 @@ class Executor:
                 )
                 return None
 
-        p_true = self.state._res_pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
+        p_true = self.state._pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
         p_market = self._get_p_market(target_side, price, ob)
         fv       = self.state.final_model_fv
         size_usd, kelly_pct = self._calc_kelly_size(p_true, p_market)
