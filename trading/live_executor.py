@@ -24,7 +24,7 @@ import httpx
 from config import Settings
 from feeds.kalshi_ws import _make_rest_headers
 from state.state_manager import StateManager
-from trading.executor import Executor, _MAX_ENTRY_PRICE
+from trading.executor import Executor, _MODEL_ACCURACY_FALLBACK
 
 _BALANCE_SYNC_S = 30.0
 _ORDER_POLL_S   = 2.0   # how often to poll Kalshi for limit order fill status
@@ -33,8 +33,8 @@ _ORDER_POLL_S   = 2.0   # how often to poll Kalshi for limit order fill status
 class LiveExecutor(Executor):
     """Real-money executor. Subclasses Executor; overrides entry and close."""
 
-    def __init__(self, state: StateManager, cfg: Settings):
-        super().__init__(state, cfg)
+    def __init__(self, state: StateManager, cfg: Settings, logger=None):
+        super().__init__(state, cfg, logger)
         self._pending_order_id:  Optional[str] = None
         self._pending_contract:  Optional[str] = None
         self._pending_side:      Optional[str] = None
@@ -106,8 +106,18 @@ class LiveExecutor(Executor):
             else:
                 limit_price = entry["price"]
 
-        limit_price = min(limit_price, _MAX_ENTRY_PRICE)
-        n_contracts = max(1, int(entry["size_usd"] / (limit_price / 100.0)))
+        # Recalculate Kelly at the actual limit price — _prepare_trade sized using the
+        # maker price (bid+1), but large_gap trades fill at the taker price (ask).
+        p_true   = self.state._res_pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
+        size_usd, kelly_pct = self._calc_kelly_size(p_true, limit_price / 100.0)
+        if size_usd <= 0:
+            self._kelly_log(
+                f"⏭ No Kelly edge at limit {limit_price:.0f}¢  p_true {p_true:.3f}"
+            )
+            self._attempted_contract = entry["contract"]
+            return
+
+        n_contracts = max(1, int(size_usd / (limit_price / 100.0)))
         yes_price   = _to_yes_price(entry["side"], limit_price)
 
         order_id = await self._place_order(
@@ -125,11 +135,14 @@ class LiveExecutor(Executor):
         self._pending_n         = n_contracts
         self._pending_price     = limit_price
         self._pending_gap       = entry["gap"]
-        self._pending_kelly_pct = entry["kelly_pct"]
+        self._pending_kelly_pct = kelly_pct
         self._last_poll_ts      = time.monotonic()
         await self.state.log_event(
             f"⏳ {entry['side']} maker limit {n_contracts}×{limit_price:.0f}¢"
-            f"  [{entry['kelly_pct']:.1f}% Kelly  gap {entry['gap']:+.1f}¢]"
+        )
+        self._kelly_log(
+            f"ORDER {entry['side']}  {n_contracts}×{limit_price:.0f}¢"
+            f"  kelly {kelly_pct:.1f}%  size ${size_usd:.0f}  gap {entry['gap']:+.1f}¢"
         )
 
     async def _manage_pending_order(self) -> None:
@@ -162,8 +175,12 @@ class LiveExecutor(Executor):
         )
         await self.state.log_event(
             f"🟢 LIVE {self._pending_side}  {self._pending_n}×{self._pending_price:.1f}¢"
-            f"  cost ${cost:.2f}  [{self._pending_kelly_pct:.1f}% Kelly  gap {self._pending_gap:+.1f}¢]"
-            f"  balance ${self.state.executor_bankroll:.2f}"
+            f"  cost ${cost:.2f}  balance ${self.state.executor_bankroll:.2f}"
+        )
+        self._kelly_log(
+            f"FILL {self._pending_side}  {self._pending_n}×{self._pending_price:.1f}¢"
+            f"  cost ${cost:.2f}  kelly {self._pending_kelly_pct:.1f}%"
+            f"  gap {self._pending_gap:+.1f}¢  balance ${self.state.executor_bankroll:.2f}"
         )
         await self._sync_balance()
         self._attempted_contract = contract

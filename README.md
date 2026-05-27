@@ -1,6 +1,6 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary signals. Locks a recommendation at the 8-minute mark and places a fill when the lock fires.
+Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary signals. Locks a recommendation at the 5-minute mark and places a fill when the lock fires. Position sizing uses half-Kelly based on measured historical accuracy.
 
 ---
 
@@ -32,25 +32,27 @@ The GBM model uses current BTC velocity (slope) as a drift term to shift the fai
 
 ### Trade lifecycle
 
-**Lock** fires when all of the following hold simultaneously inside the entry window (9:00–2:00 mark):
+**Lock** fires when all of the following hold simultaneously inside the entry window (10:00–2:00 mark):
 
-1. The raw signal has held the **same side for 20 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
+1. The raw signal has held the **same side for 10 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
 2. Slope confirms lock direction (`slope ≥ 0.05` for YES, `slope ≤ −0.05` for NO). **Bypassed** when |GBM − 50| > 25 (model already extremely confident), or when the Kraken perp basis strongly confirms the direction (basis > $80 for YES, < −$80 for NO).
 3. |GBM − 50| ≥ 15 (strong tier required — fv must be above 65% or below 35%).
 4. **Reversal guard** — early-window GBM (captured at entry window open) must be ≥ 40% for a YES lock, ≤ 60% for a NO lock. Prevents trading whipsaws where BTC started strongly on the wrong side then reversed.
 
 **Flip suppression** — once a side locks in the recommendation, it holds for 60 seconds before flipping. Early unlock when GBM crosses 45% (YES locked) or 55% (NO locked), indicating a genuine reversal.
 
-**Entry** — on lock, a **limit order is placed at `min(current ask, 75¢)`** and held open for the entire entry window. The bot polls for fill every 2 seconds. If the order hasn't filled by the 2:00 mark (window closes), it is cancelled and no trade is taken that window. This ensures the bot never pays more than 75¢, which is the EV break-even at ~77% accuracy:
+**Entry** — on lock, a **limit order is placed at the current maker price (bid+1)**, or at the ask for large-gap signals (gap ≥ 15¢). The order is held open for the entire entry window. The bot polls for fill every 2 seconds. If unfilled by the 2:00 mark, it is cancelled and no trade is taken that window.
+
+There is no hard price ceiling — **Kelly is the sole entry filter**. Any market price at or above the measured model accuracy produces zero Kelly edge and is skipped automatically. Below that, Kelly sizes proportionally to the edge available:
 
 ```
-Buy at 75¢: EV = (0.77 × 25¢) − (0.23 × 40¢) = +11¢/contract  (stop at 35¢)
-Buy at 80¢: EV = (0.77 × 20¢) − (0.23 × 45¢) =  +5¢/contract  (stop at 35¢)
+Buy at 60¢: Kelly = (0.804 − 0.60) / 0.40 = 25.5%  → capped 20%  EV ≈ +$16/trade
+Buy at 70¢: Kelly = (0.804 − 0.70) / 0.30 = 17.3%               EV ≈ +$6/trade
+Buy at 78¢: Kelly = (0.804 − 0.78) / 0.22 =  5.5%               EV ≈ +$1/trade
+Buy at 81¢: Kelly = negative                          → skipped
 ```
 
-Position size is dynamic: base $15 live / $150 paper, scaled by GBM-market gap and confirming signal count, capped at $10–$20 live / $100–$200 paper.
-
-**Stop-loss** — checked every 50 ms. If position value drops to **≤ 35¢** (YES bid for YES positions, `100 − YES ask` for NO positions), the position is closed immediately with an IoC market sell. Worst-case loss at 75¢ entry capped at 40¢/contract.
+**Position sizing** uses half-Kelly: `f* = 0.5 × (p_true − p_market) / (1 − p_market)`, capped at 20% of bankroll per trade. `p_true` is the historically measured model accuracy from all resolved windows (persisted in `logs/lifetime_stats.json`). `p_market` is the limit-order price as a probability. Trades with zero or negative edge are skipped.
 
 **Settlement** — at window close the position is marked won/lost based on the official Kalshi result.
 
@@ -203,7 +205,7 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 | `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract auto-discovery |
 | `BANKROLL` | `250.00` | Starting paper bankroll |
 | `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
-| `MAX_ENTRY_WINDOW_S` | `480.0` | Entry window opens when seconds remaining crosses this (8:00 mark) |
+| `MAX_ENTRY_WINDOW_S` | `600.0` | Entry window opens when seconds remaining crosses this (10:00 mark) |
 | `MIN_ENTRY_WINDOW_S` | `120.0` | Too-late threshold — entry window closes below this (2:00 mark) |
 | `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike to show as bullish/bearish in signal panel |
 | `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (≈ $18/min) |
@@ -223,7 +225,8 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 
 | File | Contents |
 |------|----------|
-| `logs/session_<ts>.csv` | Every analysis event this session (recommendations, skips, errors) |
+| `logs/session_<ts>.csv` | Every analysis event this session (recommendations, fills, errors) |
+| `logs/kelly_<ts>.log` | Kelly decision log — entry skips, sizing details, p_true/p_market per trade |
 | `logs/predictions.csv` | Cross-session prediction outcomes with resolution and model accuracy |
 | `logs/lifetime_stats.json` | Persisted prediction accuracy counters across all sessions |
 | `logs/executor_bankroll.json` | Trade P&L — persists across restarts |

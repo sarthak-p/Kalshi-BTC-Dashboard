@@ -601,7 +601,6 @@ class Analyzer:
             self.state._last_locked_contract = self.state.active_contract
             locked = None
 
-        # Break the 60-second flip lock early when GBM crosses the stop-loss threshold.
         gbm_strongly_opposes = (
             (locked == "YES" and fv <= 45.0) or
             (locked == "NO"  and fv >= 55.0)
@@ -705,7 +704,6 @@ class Analyzer:
                     )
 
         if self.executor:
-            await self.executor.maybe_stop_loss()
             await self.executor.maybe_trade()
 
         self.state._dirty.set()

@@ -48,9 +48,9 @@ async def main() -> None:
     gemini_feed   = GeminiFeed(state=state, cfg=settings)
 
     if settings.trading_mode == "live":
-        executor: Executor = LiveExecutor(state=state, cfg=settings)
+        executor: Executor = LiveExecutor(state=state, cfg=settings, logger=logger)
     else:
-        executor = Executor(state=state, cfg=settings)
+        executor = Executor(state=state, cfg=settings, logger=logger)
 
     analyzer      = Analyzer(state=state, cfg=settings, logger=logger, executor=executor)
 

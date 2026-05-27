@@ -1,31 +1,36 @@
 """
 Trade executor — follows the model recommendation and places paper orders.
 
-Fills are simulated at the current market price (best ask for YES, 100−best_bid for NO),
-subject to an 80¢ ceiling (_MAX_ENTRY_PRICE). If the ask exceeds the ceiling the trade
-is skipped that tick and retried on the next, simulating a resting limit order.
+Fills are simulated at the current market price (best ask for YES, 100−best_bid for NO).
+There is no hard price ceiling — Kelly is the sole entry filter. Trades with zero or
+negative edge (market price ≥ measured model accuracy) are skipped automatically.
 
 Position sizing uses half-Kelly: f* = 0.5 × (p_true − p_market) / (1 − p_market),
-where p_true is the historically measured model accuracy (80%), not GBM fair value.
-Capped at _MAX_BANKROLL_FRACTION per trade. Trades with no positive edge are skipped.
+where p_true is the historically measured model accuracy, not GBM fair value.
+Capped at _MAX_BANKROLL_FRACTION per trade.
 """
 from __future__ import annotations
 import asyncio
 
 from config import Settings
+from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
-_MAX_ENTRY_PRICE: float = 80.0
 _KELLY_FRACTION: float = 0.5          # half-Kelly multiplier
 _MAX_BANKROLL_FRACTION: float = 0.20  # hard cap: never risk more than 20% per trade
 _MODEL_ACCURACY_FALLBACK: float = 0.80  # used only if no resolved locks exist yet
 
 class Executor:
-    def __init__(self, state: StateManager, cfg: Settings):
-        self.state = state
-        self.cfg   = cfg
+    def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger | None = None):
+        self.state  = state
+        self.cfg    = cfg
+        self.logger = logger
         self._attempted_contract: str | None = None
         self._kelly_skip_logged:  str | None = None
+
+    def _kelly_log(self, msg: str) -> None:
+        if self.logger:
+            self.logger.log_kelly(msg)
 
     def _get_p_market(self, side: str, taker_price: float, ob) -> float:
         return taker_price / 100.0
@@ -45,34 +50,6 @@ class Executor:
         await self.state.log_event(
             f"📄 Paper — balance ${self.state.executor_bankroll:.2f}"
         )
-
-    async def maybe_stop_loss(self) -> None:
-        pos = self.state.position
-        if pos["status"] != "open":
-            return
-
-        contract = pos["ticker"]
-        if contract != self.state.active_contract:
-            return
-
-        side = pos["side"]
-        ob   = self.state.orderbook
-
-        if side == "YES":
-            current_value = ob.best_bid()
-        else:
-            yes_ask = ob.best_ask()
-            current_value = (100.0 - yes_ask) if yes_ask is not None else None
-
-        if current_value is None or current_value > 20.0:
-            return
-
-        await self.state.log_event(
-            f"🛑 Stop-loss: {side} dropped to {current_value:.1f}¢  "
-            f"— closing to limit loss"
-        )
-        await self._paper_close(contract, pos)
-        self._attempted_contract = contract  # prevent re-entry this window
 
     async def _prepare_trade(self) -> dict | None:
         """Run all entry guards. Returns entry params if ready to trade, None to skip."""
@@ -118,9 +95,7 @@ class Executor:
             if (target_side == "NO" and current_fv > 55.0) or \
                (target_side == "YES" and current_fv < 45.0):
                 self._attempted_contract = contract
-                await self.state.log_event(
-                    f"⏭ Skipped {target_side} — GBM reversed to {current_fv:.0f}¢"
-                )
+                self._kelly_log(f"⏭ Skipped {target_side} — GBM reversed to {current_fv:.0f}¢")
                 return None
 
         current_slope = self.state.analysis.get("slope")
@@ -131,7 +106,7 @@ class Executor:
             )
             if slope_opposes:
                 self._attempted_contract = contract
-                await self.state.log_event(
+                self._kelly_log(
                     f"⏭ Skipped {target_side} — slope opposing at execution: {current_slope:+.3f}/s"
                 )
                 return None
@@ -144,8 +119,9 @@ class Executor:
         if size_usd <= 0:
             if self._kelly_skip_logged != contract:
                 self._kelly_skip_logged = contract
-                await self.state.log_event(
-                    f"⏭ No Kelly edge {target_side} (fv {fv:.0f}¢, market {price:.0f}¢) — retrying"
+                self._kelly_log(
+                    f"⏭ No Kelly edge {target_side} — fv {fv:.0f}¢  market {price:.0f}¢"
+                    f"  p_true {p_true:.3f}  p_market {p_market:.3f}"
                 )
             return None  # don't lock out window — retry each tick in case market pulls back
 
@@ -164,9 +140,6 @@ class Executor:
             return
 
         price = entry["price"]
-        if price > _MAX_ENTRY_PRICE:
-            return  # retry next tick — simulates resting limit order
-
         n_contracts = max(1, int(entry["size_usd"] / (price / 100.0)))
         await self._paper_fill(
             entry["contract"], entry["side"], n_contracts, price,
@@ -182,7 +155,11 @@ class Executor:
         await self.state.open_position(ticker, side, contracts, fill_price, "paper")
         await self.state.log_event(
             f"📄 {side}  {contracts} × {fill_price:.1f}¢  cost ${cost:.2f}  "
-            f"[{kelly_pct:.1f}% Kelly = ${size_usd:.0f}  gap {gap:+.1f}¢]  "
+            f"balance ${self.state.executor_bankroll:.2f}"
+        )
+        self._kelly_log(
+            f"FILL {side}  {contracts} × {fill_price:.1f}¢  cost ${cost:.2f}  "
+            f"kelly {kelly_pct:.1f}%  size ${size_usd:.0f}  gap {gap:+.1f}¢  "
             f"balance ${self.state.executor_bankroll:.2f}"
         )
 
