@@ -19,6 +19,7 @@ from state.state_manager import StateManager
 _KELLY_FRACTION: float = 0.5          # half-Kelly multiplier
 _MAX_BANKROLL_FRACTION: float = 0.20  # hard cap: never risk more than 20% per trade
 _MODEL_ACCURACY_FALLBACK: float = 0.80  # used only if no resolved locks exist yet
+_STALE_PRICE_THRESHOLD: float = 40.0  # ¢ — skip if taker price deviates this far from GBM expected
 
 class Executor:
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger | None = None):
@@ -95,7 +96,20 @@ class Executor:
             if (target_side == "NO" and current_fv > 55.0) or \
                (target_side == "YES" and current_fv < 45.0):
                 self._attempted_contract = contract
-                self._kelly_log(f"⏭ Skipped {target_side} — GBM reversed to {current_fv:.0f}¢")
+                msg = f"⏭ Skipped {target_side} — GBM reversed to {current_fv:.0f}¢"
+                self._kelly_log(msg)
+                await self.state.log_event(msg)
+                return None
+
+            gbm_expected = current_fv if target_side == "YES" else (100.0 - current_fv)
+            if abs(price - gbm_expected) > _STALE_PRICE_THRESHOLD:
+                self._attempted_contract = contract
+                msg = (
+                    f"⏭ Skipped {target_side} — stale book: taker {price:.0f}¢"
+                    f" vs GBM {gbm_expected:.0f}¢"
+                )
+                self._kelly_log(msg)
+                await self.state.log_event(msg)
                 return None
 
         current_slope = self.state.analysis.get("slope")
@@ -106,23 +120,30 @@ class Executor:
             )
             if slope_opposes:
                 self._attempted_contract = contract
-                self._kelly_log(
-                    f"⏭ Skipped {target_side} — slope opposing at execution: {current_slope:+.3f}/s"
-                )
+                msg = f"⏭ Skipped {target_side} — slope opposing at execution: {current_slope:+.3f}/s"
+                self._kelly_log(msg)
+                await self.state.log_event(msg)
                 return None
 
         p_true = self.state._pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
         p_market = self._get_p_market(target_side, price, ob)
         fv       = self.state.final_model_fv
-        size_usd, kelly_pct = self._calc_kelly_size(p_true, p_market)
+        # Use GBM fv probability as Kelly input — it's calibrated to this specific trade's
+        # expected edge, unlike the flat historical accuracy which over-sizes contrarian bets.
+        # Fall back to p_true only when fv hasn't been set (still at default 50.0).
+        fv_prob  = (fv if target_side == "YES" else 100.0 - fv) / 100.0
+        p_kelly  = p_true if fv == 50.0 else min(p_true, fv_prob)
+        size_usd, kelly_pct = self._calc_kelly_size(p_kelly, p_market)
 
         if size_usd <= 0:
             if self._kelly_skip_logged != contract:
                 self._kelly_skip_logged = contract
-                self._kelly_log(
+                msg = (
                     f"⏭ No Kelly edge {target_side} — fv {fv:.0f}¢  market {price:.0f}¢"
-                    f"  p_true {p_true:.3f}  p_market {p_market:.3f}"
+                    f"  p_kelly {p_kelly:.3f}  p_market {p_market:.3f}"
                 )
+                self._kelly_log(msg)
+                await self.state.log_event(msg)
             return None  # don't lock out window — retry each tick in case market pulls back
 
         return {

@@ -1,10 +1,11 @@
 """
 Live trade executor — places real orders on Kalshi via the REST API.
 
-On lock: places a limit buy at min(current_ask, 75¢) and holds it for the
-entire entry window. Polls for fill every 2 seconds. Cancels automatically
-when the entry window closes (phase leaves entry_open). The 75¢ ceiling
-ensures positive EV at the measured ~77% accuracy.
+On lock: for small GBM gaps (<15¢) posts a maker limit at min(bid+1, ask-1);
+for large gaps (≥15¢) takes the ask directly. Holds the order for the entire
+entry window, polling for fill every 2 s. Cancels automatically when the
+window closes (phase leaves entry_open). Kelly dynamically sets the price
+ceiling based on measured model accuracy — no fixed cap.
 
 Balance is fetched from Kalshi on startup and re-synced every 30 s (and after
 every fill/close) so the dashboard always reflects the real account balance.
@@ -109,10 +110,13 @@ class LiveExecutor(Executor):
         # Recalculate Kelly at the actual limit price — _prepare_trade sized using the
         # maker price (bid+1), but large_gap trades fill at the taker price (ask).
         p_true   = self.state._pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
-        size_usd, kelly_pct = self._calc_kelly_size(p_true, limit_price / 100.0)
+        fv       = self.state.final_model_fv
+        fv_prob  = (fv if entry["side"] == "YES" else 100.0 - fv) / 100.0
+        p_kelly  = p_true if fv == 50.0 else min(p_true, fv_prob)
+        size_usd, kelly_pct = self._calc_kelly_size(p_kelly, limit_price / 100.0)
         if size_usd <= 0:
             self._kelly_log(
-                f"⏭ No Kelly edge at limit {limit_price:.0f}¢  p_true {p_true:.3f}"
+                f"⏭ No Kelly edge at limit {limit_price:.0f}¢  p_kelly {p_kelly:.3f}"
             )
             self._attempted_contract = entry["contract"]
             return
@@ -146,6 +150,20 @@ class LiveExecutor(Executor):
         )
 
     async def _manage_pending_order(self) -> None:
+        # Cancel if GBM reverses while the order is live — prevents reversal-fill at wrong price
+        current_fv = self.state.analysis.get("fv")
+        if current_fv is not None:
+            side = self._pending_side
+            if (side == "NO" and current_fv >= 55.0) or (side == "YES" and current_fv <= 45.0):
+                contract = self._pending_contract
+                await self._cancel_order(self._pending_order_id)
+                msg = f"⏳ {side} limit cancelled — GBM reversed to {current_fv:.0f}¢"
+                self._kelly_log(msg)
+                await self.state.log_event(msg)
+                self._clear_pending()
+                self._attempted_contract = contract
+                return
+
         # Cancel when the entry window has closed
         phase = self.state.analysis.get("phase")
         if phase not in ("entry_open",):
