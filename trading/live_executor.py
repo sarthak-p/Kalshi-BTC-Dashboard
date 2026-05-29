@@ -3,9 +3,8 @@ Live trade executor — places real orders on Kalshi via the REST API.
 
 On lock: for small GBM gaps (<15¢) posts a maker limit at min(bid+1, ask-1);
 for large gaps (≥15¢) takes the ask directly. Holds the order for the entire
-entry window, polling for fill every 2 s. Cancels automatically when the
-window closes (phase leaves entry_open). Kelly dynamically sets the price
-ceiling based on measured model accuracy — no fixed cap.
+entry window, polling for fill every 2 s. Cancels if GBM goes neutral or window
+closes. Position sizing is flat: cfg.trade_size_usd per trade.
 
 Balance is fetched from Kalshi on startup and re-synced every 30 s (and after
 every fill/close) so the dashboard always reflects the real account balance.
@@ -25,7 +24,7 @@ import httpx
 from config import Settings
 from feeds.kalshi_ws import _make_rest_headers
 from state.state_manager import StateManager
-from trading.executor import Executor, _MODEL_ACCURACY_FALLBACK
+from trading.executor import Executor
 
 _BALANCE_SYNC_S = 30.0
 _ORDER_POLL_S   = 2.0   # how often to poll Kalshi for limit order fill status
@@ -36,23 +35,12 @@ class LiveExecutor(Executor):
 
     def __init__(self, state: StateManager, cfg: Settings, logger=None):
         super().__init__(state, cfg, logger)
-        self._pending_order_id:  Optional[str] = None
-        self._pending_contract:  Optional[str] = None
-        self._pending_side:      Optional[str] = None
-        self._pending_n:         int   = 0
-        self._pending_price:     float = 0.0
-        self._pending_gap:       float = 0.0
-        self._pending_kelly_pct: float = 0.0
-        self._last_poll_ts:      float = 0.0
-
-    def _get_p_market(self, side: str, taker_price: float, ob) -> float:
-        if side == "YES":
-            bid = ob.best_bid()
-            maker = (bid + 1) if bid is not None else taker_price
-        else:
-            yes_ask = ob.best_ask()
-            maker = ((100.0 - yes_ask) + 1) if yes_ask is not None else taker_price
-        return min(maker, taker_price) / 100.0
+        self._pending_order_id: Optional[str] = None
+        self._pending_contract: Optional[str] = None
+        self._pending_side:     Optional[str] = None
+        self._pending_n:        int   = 0
+        self._pending_price:    float = 0.0
+        self._last_poll_ts:     float = 0.0
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
@@ -69,6 +57,67 @@ class LiveExecutor(Executor):
     async def maybe_trade(self) -> None:
         contract = self.state.active_contract
 
+        # ── Exit checks for open positions ────────────────────────────────────
+        pos    = self.state.position
+        in_pos = pos["status"] == "open" and pos["ticker"] == contract
+
+        if not in_pos:
+            self._tp_target = 0.0
+        else:
+            ob         = self.state.orderbook
+            current_fv = self.state.analysis.get("fv")
+            pos_side   = pos["side"]
+
+            # Take-profit: exit when market reaches entry + 10¢
+            if self._tp_target > 0:
+                if pos_side == "YES":
+                    sell_px = ob.best_bid()
+                    if sell_px is not None and sell_px >= self._tp_target:
+                        tp = self._tp_target
+                        self._tp_target = 0.0
+                        await self.state.log_event(
+                            f"🎯 TP hit {pos_side} @ {sell_px:.1f}¢ (target {tp:.1f}¢)"
+                        )
+                        await self._paper_close(contract, pos)
+                        self._attempted_contract = contract
+                        return
+                else:
+                    yes_ask = ob.best_ask()
+                    if yes_ask is not None:
+                        no_sell = 100.0 - yes_ask
+                        if no_sell >= self._tp_target:
+                            tp = self._tp_target
+                            self._tp_target = 0.0
+                            await self.state.log_event(
+                                f"🎯 TP hit {pos_side} @ {no_sell:.1f}¢ (target {tp:.1f}¢)"
+                            )
+                            await self._paper_close(contract, pos)
+                            self._attempted_contract = contract
+                            return
+
+            # GBM-neutral exit: close immediately when fv reaches 50%
+            if current_fv is not None:
+                if (pos_side == "YES" and current_fv <= 50.0) or \
+                   (pos_side == "NO"  and current_fv >= 50.0):
+                    self._tp_target = 0.0
+                    await self.state.log_event(
+                        f"📉 GBM neutral exit {pos_side} — fv {current_fv:.0f}%"
+                    )
+                    await self._paper_close(contract, pos)
+                    self._attempted_contract = contract
+                    return
+
+            # Time-based exit: never hold to settlement — stale pricing risk
+            phase = self.state.analysis.get("phase")
+            if phase in ("too_late", "closing"):
+                self._tp_target = 0.0
+                await self.state.log_event(
+                    f"⏰ Time exit {pos_side} — window closing, selling before settlement"
+                )
+                await self._paper_close(contract, pos)
+                self._attempted_contract = contract
+                return
+
         # Cancel stale pending order when contract changes
         if self._pending_order_id and self._pending_contract != contract:
             await self._cancel_order(self._pending_order_id)
@@ -84,44 +133,29 @@ class LiveExecutor(Executor):
         if entry is None:
             return
 
-        # Post as maker at bid+1 — best position on the book, zero fees
+        # Post as maker at bid+1 for small gaps, take ask for large gaps (≥15¢)
         ob   = self.state.orderbook
         side = entry["side"]
-
         large_gap = abs(entry["gap"]) >= 15.0
 
         if side == "YES":
-            bid         = ob.best_bid()
-            ask         = ob.best_ask()
+            bid = ob.best_bid()
+            ask = ob.best_ask()
             if bid is not None and ask is not None:
                 limit_price = ask if large_gap else min(bid + 1, ask - 1)
             else:
                 limit_price = entry["price"]
         else:
-            yes_bid     = ob.best_bid()
-            yes_ask     = ob.best_ask()
+            yes_bid = ob.best_bid()
+            yes_ask = ob.best_ask()
             if yes_bid is not None and yes_ask is not None:
-                no_ask      = 100.0 - yes_bid
-                no_bid      = 100.0 - yes_ask
+                no_ask = 100.0 - yes_bid
+                no_bid = 100.0 - yes_ask
                 limit_price = no_ask if large_gap else min(no_bid + 1, no_ask - 1)
             else:
                 limit_price = entry["price"]
 
-        # Recalculate Kelly at the actual limit price — _prepare_trade sized using the
-        # maker price (bid+1), but large_gap trades fill at the taker price (ask).
-        p_true   = self.state._pred_accuracy(lifetime=True) or _MODEL_ACCURACY_FALLBACK
-        fv       = self.state.final_model_fv
-        fv_prob  = (fv if entry["side"] == "YES" else 100.0 - fv) / 100.0
-        p_kelly  = p_true if fv == 50.0 else min(p_true, fv_prob)
-        size_usd, kelly_pct = self._calc_kelly_size(p_kelly, limit_price / 100.0)
-        if size_usd <= 0:
-            self._kelly_log(
-                f"⏭ No Kelly edge at limit {limit_price:.0f}¢  p_kelly {p_kelly:.3f}"
-            )
-            self._attempted_contract = entry["contract"]
-            return
-
-        n_contracts = max(1, int(size_usd / (limit_price / 100.0)))
+        n_contracts = max(1, int(self.cfg.trade_size_usd / (limit_price / 100.0)))
         yes_price   = _to_yes_price(entry["side"], limit_price)
 
         order_id = await self._place_order(
@@ -133,33 +167,28 @@ class LiveExecutor(Executor):
             )
             return
 
-        self._pending_order_id  = order_id
-        self._pending_contract  = entry["contract"]
-        self._pending_side      = entry["side"]
-        self._pending_n         = n_contracts
-        self._pending_price     = limit_price
-        self._pending_gap       = entry["gap"]
-        self._pending_kelly_pct = kelly_pct
-        self._last_poll_ts      = time.monotonic()
+        self._pending_order_id = order_id
+        self._pending_contract = entry["contract"]
+        self._pending_side     = entry["side"]
+        self._pending_n        = n_contracts
+        self._pending_price    = limit_price
+        self._last_poll_ts     = time.monotonic()
         await self.state.log_event(
             f"⏳ {entry['side']} maker limit {n_contracts}×{limit_price:.0f}¢"
-        )
-        self._kelly_log(
-            f"ORDER {entry['side']}  {n_contracts}×{limit_price:.0f}¢"
-            f"  kelly {kelly_pct:.1f}%  size ${size_usd:.0f}  gap {entry['gap']:+.1f}¢"
+            f"  gap {entry['gap']:+.1f}¢"
         )
 
     async def _manage_pending_order(self) -> None:
-        # Cancel if GBM reverses while the order is live — prevents reversal-fill at wrong price
+        # Cancel if GBM goes neutral while the order is live
         current_fv = self.state.analysis.get("fv")
         if current_fv is not None:
             side = self._pending_side
-            if (side == "NO" and current_fv >= 55.0) or (side == "YES" and current_fv <= 45.0):
+            if (side == "NO" and current_fv >= 50.0) or (side == "YES" and current_fv <= 50.0):
                 contract = self._pending_contract
                 await self._cancel_order(self._pending_order_id)
-                msg = f"⏳ {side} limit cancelled — GBM reversed to {current_fv:.0f}¢"
-                self._kelly_log(msg)
-                await self.state.log_event(msg)
+                await self.state.log_event(
+                    f"⏳ {side} limit cancelled — GBM neutral {current_fv:.0f}¢"
+                )
                 self._clear_pending()
                 self._attempted_contract = contract
                 return
@@ -195,24 +224,18 @@ class LiveExecutor(Executor):
             f"🟢 LIVE {self._pending_side}  {self._pending_n}×{self._pending_price:.1f}¢"
             f"  cost ${cost:.2f}  balance ${self.state.executor_bankroll:.2f}"
         )
-        self._kelly_log(
-            f"FILL {self._pending_side}  {self._pending_n}×{self._pending_price:.1f}¢"
-            f"  cost ${cost:.2f}  kelly {self._pending_kelly_pct:.1f}%"
-            f"  gap {self._pending_gap:+.1f}¢  balance ${self.state.executor_bankroll:.2f}"
-        )
         await self._sync_balance()
+        self._tp_target = self._pending_price + 10.0
         self._attempted_contract = contract
         self._clear_pending()
 
     def _clear_pending(self) -> None:
-        self._pending_order_id  = None
-        self._pending_contract  = None
-        self._pending_side      = None
-        self._pending_n         = 0
-        self._pending_price     = 0.0
-        self._pending_gap       = 0.0
-        self._pending_kelly_pct = 0.0
-        self._last_poll_ts      = 0.0
+        self._pending_order_id = None
+        self._pending_contract = None
+        self._pending_side     = None
+        self._pending_n        = 0
+        self._pending_price    = 0.0
+        self._last_poll_ts     = 0.0
 
     # ── Close override ────────────────────────────────────────────────────────
 

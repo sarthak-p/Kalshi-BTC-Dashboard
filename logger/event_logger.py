@@ -24,7 +24,6 @@ class EventLogger:
         self._buffer: deque[dict] = deque(maxlen=BUFFER_MAX)
         self._lock = asyncio.Lock()
         self._csv_path: Path | None = None
-        self._kelly_path: Path | None = None
         self._fieldnames: list[str] = ["ts", "event", "data"]
 
     _PRED_FIELDS: list[str] = [
@@ -56,15 +55,6 @@ class EventLogger:
             if write_header:
                 writer.writeheader()
             writer.writerow(data)
-
-    def log_kelly(self, msg: str) -> None:
-        """Write a Kelly decision line to logs/kelly_TIMESTAMP.log (synchronous, infrequent)."""
-        LOG_DIR.mkdir(exist_ok=True)
-        if self._kelly_path is None:
-            self._kelly_path = LOG_DIR / f"kelly_{int(time.time())}.log"
-        ts = time.strftime("%H:%M:%S")
-        with open(self._kelly_path, "a") as f:
-            f.write(f"[{ts}] {msg}\n")
 
     # ── Background flush loop (run as an asyncio task) ───────────────────────
 

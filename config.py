@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # ── Entry-window phase thresholds (for dashboard phase indicator) ─────────
     # Only show "entry open" when this many seconds or fewer remain
-    max_entry_window_s: float = Field(default=600.0, env="MAX_ENTRY_WINDOW_S")
+    max_entry_window_s: float = Field(default=720.0, env="MAX_ENTRY_WINDOW_S")
     # "Too late" threshold
     min_entry_window_s: float = Field(default=120.0, env="MIN_ENTRY_WINDOW_S")
 
@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     kalshi_ws_base: str = Field(default="", env="KALSHI_WS_BASE")
 
     bankroll: float = Field(default=250.0, env="BANKROLL")
+    trade_size_usd: float = Field(default=40.0, env="TRADE_SIZE_USD")
 
 
     def model_post_init(self, __context) -> None:
