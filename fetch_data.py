@@ -24,7 +24,7 @@ from config import Settings
 from feeds.kalshi_ws import _make_rest_headers
 
 SERIES      = "KXBTC15M"
-DAYS        = 60
+DAYS        = 180
 CACHE_FILE  = Path("/Users/sarthak-p/Desktop/kalshi-btc-bot/logs/candle_cache.json")
 MARKET_FILE = Path("/Users/sarthak-p/Desktop/kalshi-btc-bot/logs/market_cache.json")
 RATE_LIMIT  = 0.10

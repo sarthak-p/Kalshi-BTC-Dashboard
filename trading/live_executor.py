@@ -61,62 +61,7 @@ class LiveExecutor(Executor):
         pos    = self.state.position
         in_pos = pos["status"] == "open" and pos["ticker"] == contract
 
-        if not in_pos:
-            self._tp_target = 0.0
-        else:
-            ob         = self.state.orderbook
-            current_fv = self.state.analysis.get("fv")
-            pos_side   = pos["side"]
 
-            # Take-profit: exit when market reaches entry + 10¢
-            if self._tp_target > 0:
-                if pos_side == "YES":
-                    sell_px = ob.best_bid()
-                    if sell_px is not None and sell_px >= self._tp_target:
-                        tp = self._tp_target
-                        self._tp_target = 0.0
-                        await self.state.log_event(
-                            f"🎯 TP hit {pos_side} @ {sell_px:.1f}¢ (target {tp:.1f}¢)"
-                        )
-                        await self._paper_close(contract, pos)
-                        self._attempted_contract = contract
-                        return
-                else:
-                    yes_ask = ob.best_ask()
-                    if yes_ask is not None:
-                        no_sell = 100.0 - yes_ask
-                        if no_sell >= self._tp_target:
-                            tp = self._tp_target
-                            self._tp_target = 0.0
-                            await self.state.log_event(
-                                f"🎯 TP hit {pos_side} @ {no_sell:.1f}¢ (target {tp:.1f}¢)"
-                            )
-                            await self._paper_close(contract, pos)
-                            self._attempted_contract = contract
-                            return
-
-            # GBM-neutral exit: close immediately when fv reaches 50%
-            if current_fv is not None:
-                if (pos_side == "YES" and current_fv <= 50.0) or \
-                   (pos_side == "NO"  and current_fv >= 50.0):
-                    self._tp_target = 0.0
-                    await self.state.log_event(
-                        f"📉 GBM neutral exit {pos_side} — fv {current_fv:.0f}%"
-                    )
-                    await self._paper_close(contract, pos)
-                    self._attempted_contract = contract
-                    return
-
-            # Time-based exit: never hold to settlement — stale pricing risk
-            phase = self.state.analysis.get("phase")
-            if phase in ("too_late", "closing"):
-                self._tp_target = 0.0
-                await self.state.log_event(
-                    f"⏰ Time exit {pos_side} — window closing, selling before settlement"
-                )
-                await self._paper_close(contract, pos)
-                self._attempted_contract = contract
-                return
 
         # Cancel stale pending order when contract changes
         if self._pending_order_id and self._pending_contract != contract:
@@ -225,7 +170,6 @@ class LiveExecutor(Executor):
             f"  cost ${cost:.2f}  balance ${self.state.executor_bankroll:.2f}"
         )
         await self._sync_balance()
-        self._tp_target = self._pending_price + 10.0
         self._attempted_contract = contract
         self._clear_pending()
 
