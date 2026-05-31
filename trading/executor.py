@@ -11,8 +11,6 @@ from config import Settings
 from logger.event_logger import EventLogger
 from state.state_manager import StateManager
 
-_STALE_PRICE_THRESHOLD: float = 40.0  # ¢ — skip if paying more than this above GBM expected
-
 
 class Executor:
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger | None = None):
@@ -57,14 +55,6 @@ class Executor:
         if not price:
             return None
 
-        # Skip if entry price exceeds the hard ceiling
-        if price > self.cfg.max_entry_price_cents:
-            self._attempted_contract = contract
-            await self.state.log_event(
-                f"⏭ Skipped {target_side} — entry {price:.0f}¢ above max {self.cfg.max_entry_price_cents:.0f}¢"
-            )
-            return None
-
         pos = self.state.position
         in_contract = pos["status"] == "open" and pos["ticker"] == contract
 
@@ -83,28 +73,6 @@ class Executor:
                 )
                 return None
 
-            gbm_expected = current_fv if target_side == "YES" else (100.0 - current_fv)
-            # Only block when overpaying — cheap-vs-GBM entries are fine
-            if price > gbm_expected + _STALE_PRICE_THRESHOLD:
-                self._attempted_contract = contract
-                await self.state.log_event(
-                    f"⏭ Skipped {target_side} — overpaying: taker {price:.0f}¢"
-                    f" vs GBM {gbm_expected:.0f}¢"
-                )
-                return None
-
-        current_slope = self.state.analysis.get("slope")
-        if current_slope is not None:
-            slope_opposes = (
-                (target_side == "YES" and current_slope < -0.10) or
-                (target_side == "NO"  and current_slope >  0.10)
-            )
-            if slope_opposes:
-                self._attempted_contract = contract
-                await self.state.log_event(
-                    f"⏭ Skipped {target_side} — slope opposing at execution: {current_slope:+.3f}/s"
-                )
-                return None
 
         n_contracts = max(1, int(self.cfg.trade_size_usd / (price / 100.0)))
         return {

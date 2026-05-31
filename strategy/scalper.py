@@ -425,7 +425,7 @@ def _compute_recommendation(
     }
 
 class Analyzer:
-    _LOCK_STABILITY_SECS = 20.0  # signal must hold the same side this long before locking
+    _LOCK_STABILITY_SECS = 15.0  # signal must hold the same side this long before locking
 
     def __init__(self, state: StateManager, cfg: Settings, logger: EventLogger, executor=None):
         self.state    = state
@@ -434,7 +434,6 @@ class Analyzer:
         self.executor = executor
         self._stable_side: Optional[str] = None
         self._stable_since: float = 0.0
-        self._slope_suppressed_logged: bool = False
         self._veto_logged: bool = False
 
     async def run(self) -> None:
@@ -484,7 +483,6 @@ class Analyzer:
             phase = "monitoring"
             self._stable_side = None
             self._stable_since = 0.0
-            self._slope_suppressed_logged = False
             self._veto_logged = False
         elif tau_seconds >= self.cfg.min_entry_window_s:
             phase = "entry_open"
@@ -500,45 +498,6 @@ class Analyzer:
         yes_ask = ob.best_ask() or 0.0
         no_ask = (100.0 - ob.best_bid()) if ob.best_bid() is not None else 0.0
         entry_price = yes_ask if side == "yes" else no_ask
-        price_in_range = (
-            self.cfg.min_entry_price_cents <= entry_price <= self.cfg.max_entry_price_cents
-        ) if entry_price > 0 else False
-
-        # Monitoring-window checks (line crossings, direction consistency)
-        monitoring_start = self.state.window_discovered_ts + self.cfg.new_window_settle_s
-        monitoring_mids = [(ts, m) for ts, m in self.state.kalshi_mid_history
-                           if ts >= monitoring_start]
-
-        line_crossings = None
-        crossings_ok = None
-        direction_score = None
-        direction_ok = None
-
-        if len(monitoring_mids) >= 10:
-            crossings = sum(
-                1 for i in range(1, len(monitoring_mids))
-                if (monitoring_mids[i][1] - 50.0) * (monitoring_mids[i - 1][1] - 50.0) < 0
-            )
-            line_crossings = crossings
-            crossings_ok = crossings <= self.cfg.max_line_crossings
-
-            mid = ob.mid()
-            if mid is not None and abs(mid - 50.0) < 20.0:
-                recent_mids = [(ts, m) for ts, m in monitoring_mids if ts >= now - 120.0]
-                if len(recent_mids) >= 6:
-                    step = len(recent_mids) // 6
-                    steps_away = 0
-                    for i in range(5):
-                        m0 = recent_mids[i * step][1]
-                        m1 = recent_mids[(i + 1) * step][1]
-                        if side == "yes" and m1 > m0:
-                            steps_away += 1
-                        elif side == "no" and m1 < m0:
-                            steps_away += 1
-                    direction_score = round(steps_away / 5.0, 2)
-                    direction_ok = direction_score >= self.cfg.min_direction_consistency
-            else:
-                direction_ok = True  # price deeply committed, check skipped
 
         # Write analysis conditions (direct write — sole writer)
         self.state.analysis.update({
@@ -546,13 +505,7 @@ class Analyzer:
             "fv": round(fv, 1),
             "slope": round(slope, 3),
             "side": side,
-            "btc_move_ok": abs(btc_change) >= self.cfg.momentum_entry_usd,
-            "price_in_range": price_in_range,
             "entry_price": round(entry_price, 1) if entry_price > 0 else None,
-            "line_crossings": line_crossings,
-            "crossings_ok": crossings_ok,
-            "direction_score": direction_score,
-            "direction_ok": direction_ok,
         })
 
         # Recommendation (direct write)
@@ -644,7 +597,6 @@ class Analyzer:
             if raw_side is not None and raw_side != self._stable_side:
                 self._stable_side = raw_side
                 self._stable_since = now
-                self._slope_suppressed_logged = False
                 self._veto_logged = False
             elif raw_side is None:
                 # Signal went neutral — reset stability timer so YES→neutral→YES doesn't accumulate time
@@ -656,38 +608,22 @@ class Analyzer:
                 yes_ask_p = ob.best_ask() or 0.0
                 kalshi_mid = (yes_bid_p + yes_ask_p) / 2.0 if yes_bid_p and yes_ask_p else None
                 gap = ((fv - kalshi_mid) if raw_side == "YES" else (kalshi_mid - fv)) if kalshi_mid is not None else None
-                # Slope must confirm lock direction — flat/opposing slope indicates a wick recovery.
-                # Bypass when: GBM is already extremely committed (|fv-50| > 25),
-                # OR the Kraken perp basis strongly confirms the direction (institutional lead signal).
-                _perp_b = self.state.perp_basis_smoothed()
-                slope_aligns = (
-                    (raw_side == "YES" and slope >= 0.05) or
-                    (raw_side == "NO"  and slope <= -0.05) or
-                    abs(fv - 50.0) > 25.0 or
-                    (raw_side == "YES" and _perp_b > 80.0) or
-                    (raw_side == "NO"  and _perp_b < -80.0)
+                slope_opposes = (
+                    (raw_side == "YES" and slope < -0.10) or
+                    (raw_side == "NO"  and slope >  0.10)
                 )
-                if not slope_aligns:
-                    if not self._slope_suppressed_logged:
-                        self._slope_suppressed_logged = True
-                        await self.state.log_event(
-                            f"⏸ Lock suppressed: {raw_side} slope={slope:+.2f}/s (waiting for alignment)"
-                        )
-                elif abs(fv - 50.0) < 15.0:
+                if abs(fv - 50.0) < 20.0:
                     if not self._veto_logged:
                         self._veto_logged = True
                         await self.state.log_event(
-                            f"⛔ Lock skipped: GBM {fv:.0f}% below strong tier (|fv−50|<15)"
+                            f"⛔ Lock skipped: GBM {fv:.0f}% below strong tier (|fv−50|<20)"
                         )
-                elif not (
-                    (raw_side == "YES" and self.state.prediction_locked_yes_pct >= 40.0) or
-                    (raw_side == "NO"  and self.state.prediction_locked_yes_pct <= 60.0)
-                ):
+                elif slope_opposes:
                     if not self._veto_logged:
                         self._veto_logged = True
+                        self._attempted_contract = self.state.active_contract
                         await self.state.log_event(
-                            f"⛔ Lock skipped: {raw_side} reversal trade — "
-                            f"early-window GBM {self.state.prediction_locked_yes_pct:.0f}% opposed direction"
+                            f"⛔ Lock skipped: slope {slope:+.2f}/s opposes {raw_side} — skipping window"
                         )
                 else:
                     self.state.signal_snapshot = {

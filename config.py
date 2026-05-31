@@ -36,12 +36,6 @@ class Settings(BaseSettings):
     # "Too late" threshold
     min_entry_window_s: float = Field(default=120.0, env="MIN_ENTRY_WINDOW_S")
 
-    # ── Sweet-spot price range (informational — helps pick entry price) ───────
-    # min: below this the contract is priced too cheap (early-window ~50¢ is fine)
-    # max: above this the risk/reward is bad (paying 85¢ to win 15¢)
-    min_entry_price_cents: float = Field(default=30.0, env="MIN_ENTRY_PRICE_CENTS")
-    max_entry_price_cents: float = Field(default=90.0, env="MAX_ENTRY_PRICE_CENTS")
-
     # ── BTC momentum threshold for recommendation ─────────────────────────────
     momentum_entry_usd: float = Field(default=20.0, env="MOMENTUM_ENTRY_USD")
 
@@ -57,10 +51,6 @@ class Settings(BaseSettings):
 
     # ── Velocity pause (flash-crash guard) ───────────────────────────────────
     momentum_threshold_usd: float = Field(default=150.0, env="MOMENTUM_THRESHOLD_USD")
-
-    # ── "Away from the line" indicators ──────────────────────────────────────
-    max_line_crossings: int = Field(default=2, env="MAX_LINE_CROSSINGS")
-    min_direction_consistency: float = Field(default=0.6, env="MIN_DIRECTION_CONSISTENCY")
 
     # ── BTC slope signal threshold ────────────────────────────────────────────
     # Minimum |slope| in $/s to treat as a directional signal.

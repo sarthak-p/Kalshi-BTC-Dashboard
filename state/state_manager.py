@@ -236,13 +236,7 @@ class StateManager:
         self.analysis: dict = {
             "phase": "waiting",
             "side": None,
-            "btc_move_ok": False,
-            "price_in_range": False,
             "entry_price": None,
-            "line_crossings": None,
-            "crossings_ok": None,
-            "direction_score": None,
-            "direction_ok": None,
         }
 
         # Recommendation (written directly by analyzer)

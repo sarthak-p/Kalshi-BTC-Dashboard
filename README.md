@@ -1,6 +1,6 @@
 # Kalshi BTC 15-Min Trading Bot
 
-Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary signals. Locks a recommendation at the 5-minute mark and places a fill when the lock fires. Position sizing uses half-Kelly based on measured historical accuracy.
+Automated trading bot for Kalshi BTC 15-minute binary markets. Uses a drift-adjusted GBM fair-value model as the primary signal, with BTC slope and RSI/BB technical bias as secondary signals. Locks a recommendation at the 5-minute mark, places a limit order, and holds the position to settlement.
 
 ---
 
@@ -11,7 +11,7 @@ Each `KXBTC15M` contract is a binary that pays **$1.00 if BTC closes at or above
 - **Buy YES at 40¢** → profit 60¢ if BTC closes up, lose 40¢ if not
 - **Buy NO at 35¢** → profit 65¢ if BTC closes down, lose 35¢ if not
 
-Kalshi settles using CF Benchmarks' BRTI — a volume-weighted average of Coinbase, Kraken, Bitstamp, itBit, Gemini, LMAX, and Crypto.com prices over the 60 seconds before close. The bot queries the Kalshi settlement API for the official result.
+Kalshi settles using CF Benchmarks' BRTI — a volume-weighted average of Coinbase, Kraken, Bitstamp, itBit, Gemini, LMAX, and Crypto.com prices over the 60 seconds before close.
 
 ---
 
@@ -26,35 +26,23 @@ Kalshi settles using CF Benchmarks' BRTI — a volume-weighted average of Coinba
 
 `bias=up` is never a standalone trade trigger — informational only.
 
-### GBM slope drift cap
+### Lock gate filters (applied before locking)
 
-The GBM model uses current BTC velocity (slope) as a drift term to shift the fair-value probability. The slope is projected over **at most 90 seconds**, not the full remaining window time. Projecting over the full 7–8 minutes remaining inflates GBM unrealistically — a mild +0.25 $/s slope over 450 s implies +$112 of BTC movement, which pushes a below-strike position from ~30% to ~64% YES. Capped at 90 s, the drift contribution is realistic and the model stays aligned with the market.
+Three checks must all pass before a lock fires:
+
+1. **Strong tier** — `|fv − 50| ≥ 20` (GBM must be ≥ 70% YES or ≤ 30% YES). Blocks weak 65–70% signals that historically lose disproportionately.
+2. **Slope veto** — if BTC slope actively opposes the signal direction by more than **0.10 $/s**, the entire window is skipped. Slope must be confirming or neutral.
+3. *(Reversal guard removed)* — contrarian momentum trades (BTC opposite-direction but slope pushing back) are now allowed; they are profitable over time despite lower individual win rate.
+
+**Lock** fires when the raw signal holds the same side for **15 continuous seconds** inside the entry window (5:00–2:00 mark). The timer resets to zero if the signal goes neutral or flips.
 
 ### Trade lifecycle
 
-**Lock** fires when all of the following hold simultaneously inside the entry window (10:00–2:00 mark):
+**Entry** — on lock, a limit order is placed at the **current ask price** (always taker). Fills within milliseconds. The order is cancelled if GBM crosses 50% neutral or the entry window closes.
 
-1. The raw signal has held the **same side for 10 continuous seconds**. The timer resets to zero if the signal goes neutral, so YES → neutral → YES does not accumulate time.
-2. Slope confirms lock direction (`slope ≥ 0.05` for YES, `slope ≤ −0.05` for NO). **Bypassed** when |GBM − 50| > 25 (model already extremely confident), or when the Kraken perp basis strongly confirms the direction (basis > $80 for YES, < −$80 for NO).
-3. |GBM − 50| ≥ 15 (strong tier required — fv must be above 65% or below 35%).
-4. **Reversal guard** — early-window GBM (captured at entry window open) must be ≥ 40% for a YES lock, ≤ 60% for a NO lock. Prevents trading whipsaws where BTC started strongly on the wrong side then reversed.
+**Hold to settlement** — once filled, the position is held until the contract settles. There are no take-profit or stop-loss exits. Kalshi settles the contract at window close and credits/debits the account automatically.
 
-**Flip suppression** — once a side locks in the recommendation, it holds for 60 seconds before flipping. Early unlock when GBM crosses 45% (YES locked) or 55% (NO locked), indicating a genuine reversal.
-
-**Entry** — on lock, a **limit order is placed at the current maker price (bid+1)**, or at the ask for large-gap signals (gap ≥ 15¢). The order is held open for the entire entry window. The bot polls for fill every 2 seconds. If unfilled by the 2:00 mark, it is cancelled and no trade is taken that window.
-
-There is no hard price ceiling — **Kelly is the sole entry filter**. Any market price at or above the measured model accuracy produces zero Kelly edge and is skipped automatically. Below that, Kelly sizes proportionally to the edge available:
-
-```
-Buy at 60¢: Kelly = (0.804 − 0.60) / 0.40 = 25.5%  → capped 20%  EV ≈ +$16/trade
-Buy at 70¢: Kelly = (0.804 − 0.70) / 0.30 = 17.3%               EV ≈ +$6/trade
-Buy at 78¢: Kelly = (0.804 − 0.78) / 0.22 =  5.5%               EV ≈ +$1/trade
-Buy at 81¢: Kelly = negative                          → skipped
-```
-
-**Position sizing** uses half-Kelly: `f* = 0.5 × (p_true − p_market) / (1 − p_market)`, capped at 20% of bankroll per trade. `p_true` is the historically measured model accuracy from all resolved windows (persisted in `logs/lifetime_stats.json`). `p_market` is the limit-order price as a probability. Trades with zero or negative edge are skipped.
-
-**Settlement** — at window close the position is marked won/lost based on the official Kalshi result.
+**Position sizing** — flat dollar amount per trade (`TRADE_SIZE_USD`), converted to fractional contracts at the limit price. Uses `fractional_trading_enabled` on Kalshi markets for exact dollar-based sizing.
 
 ---
 
@@ -63,9 +51,11 @@ Buy at 81¢: Kelly = negative                          → skipped
 GBM (Geometric Brownian Motion) computes the probability that BTC closes at or above the window-open strike. Inputs:
 
 - Current BTC price vs strike (equal-weighted average of Coinbase, Kraken, Bitstamp, and Gemini)
-- Time remaining in the window
-- Current BTC velocity (slope of recent price) — shifts the z-score so a rising BTC scores higher even if still below strike; capped at 90 s projection
-- Volatility: Deribit DVOL (implied vol) when tau > 3 min; 5-min rolling realized vol when tau < 3 min (sharper near close)
+- Time remaining in the window (`tau`)
+- Current BTC velocity (slope) — shifts the z-score; capped at 90s projection
+- Volatility: Deribit DVOL (implied vol) when tau > 3 min; 5-min rolling realized vol when tau < 3 min
+
+`BTC_SIGMA` (default `0.35`) is the annualized vol fallback used when DVOL is unavailable. Matches Deribit DVOL which typically runs 30–40% for BTC. Using a higher value inflates GBM uncertainty and suppresses valid signals.
 
 ---
 
@@ -80,13 +70,13 @@ The bot averages prices from four exchanges in real time — all BRTI constituen
 | Bitstamp | `wss://ws.bitstamp.net` | live\_trades\_btcusd |
 | Gemini | `wss://api.gemini.com/v1/marketdata/BTCUSD` | trade events, WebSocket |
 
-`btc_price` is the equal-weighted average of whichever exchanges have a non-zero price. This covers 4 of the 7 BRTI constituent exchanges; itBit was dropped (API abandoned/cert expired), LMAX and Crypto.com have no accessible public feeds.
+`btc_price` is the equal-weighted average of whichever exchanges have a non-zero price.
 
 ---
 
 ## Technical bias (RSI/BB)
 
-Fetched every **15 seconds between windows** (locked during active windows) from Coinbase Exchange 1-minute candles — last 35 candles.
+Fetched every **15 seconds between windows** from Coinbase Exchange 1-minute candles — last 35 candles.
 
 | Indicator | Bullish (`up`) | Bearish (`down`) |
 |-----------|---------------|-----------------|
@@ -94,10 +84,8 @@ Fetched every **15 seconds between windows** (locked during active windows) from
 | Bollinger Band position | > 0.6 (near upper band) | < 0.4 (near lower band) |
 | ADX(14) | must be ≥ 15 for any signal to count | < 15 → all signals suppressed |
 
-- `bias=down` (bearish) may drive a NO trade when GBM+slope are neutral and GBM < 40%
-- `bias=up` (bullish) is informational only — never triggers a trade independently
-
-The bias is locked at window discovery and does not update mid-window.
+- `bias=down` may drive a NO trade when GBM+slope are neutral and GBM < 40%
+- `bias=up` is informational only — never triggers a trade independently
 
 ---
 
@@ -106,18 +94,16 @@ The bias is locked at window discovery and does not update mid-window.
 | Feed | Source | Update rate | Purpose |
 |------|--------|-------------|---------|
 | BTC price + CVD | Coinbase Advanced Trade WS | Tick | GBM input, CVD signal, slope history |
-| BTC price | Kraken WS v1 | Tick | Multi-exchange price average |
-| BTC price | Bitstamp WS | Tick | Multi-exchange price average |
-| BTC price | Gemini WS v1 | Tick | Multi-exchange price average (BRTI constituent) |
+| BTC price | Kraken WS v1 | Tick | Multi-exchange average |
+| BTC price | Bitstamp WS | Tick | Multi-exchange average |
+| BTC price | Gemini WS v1 | Tick | Multi-exchange average |
 | Kalshi orderbook | Kalshi WS | Tick | Entry price, OB imbalance |
-| Perp mark/index | Kraken `futures.kraken.com/ws/v1` (PI_XBTUSD) | Tick | Perp basis lead signal; slope-gate bypass |
+| Perp mark/index | Kraken `futures.kraken.com/ws/v1` (PI_XBTUSD) | Tick | Perp basis lead signal |
 | DVOL | Deribit REST | Every 15 s | GBM vol input |
 | Funding rate | OKX REST | Every 15 s | Informational signal |
-| Taker ratio | `fstream.binance.com/ws/btcusdt@aggTrade` | Real-time | 5-min rolling buy/sell ratio; informational |
-| Depth imbalance | `fstream.binance.com/ws/btcusdt@depth20@100ms` | 100 ms | Top-10 bid/ask imbalance; informational |
-| Liquidations | `fstream.binance.com/ws/btcusdt@forceOrder` | Tick | 2-min rolling long/short liq USD; informational |
-
-All Binance feeds use `fstream.binance.com` (futures streaming endpoint), which is accessible from the US.
+| Taker ratio | `fstream.binance.com/ws/btcusdt@aggTrade` | Real-time | 5-min rolling buy/sell ratio |
+| Depth imbalance | `fstream.binance.com/ws/btcusdt@depth20@100ms` | 100 ms | Top-10 bid/ask imbalance |
+| Liquidations | `fstream.binance.com/ws/btcusdt@forceOrder` | Tick | 2-min rolling long/short liq USD |
 
 ---
 
@@ -165,33 +151,19 @@ main.py
   → BtcFeed.run()                     Coinbase BTC-USD price (ticker) + CVD (trade stream)
   → KrakenFeed.run()                  Kraken XBT/USD price
   → BitstampFeed.run()                Bitstamp BTC/USD price
-  → GeminiFeed.run()                  Gemini BTC/USD price (WebSocket v1 trade feed)
+  → GeminiFeed.run()                  Gemini BTC/USD price
   → KrakenPerpFeed.run()              Kraken PI_XBTUSD mark/index → 30 s smoothed perp basis
   → FuturesTakerFeed.run()            Binance Futures aggTrade → rolling 5-min taker ratio
   → BinanceDepthFeed.run()            Binance Futures depth20@100ms → bid/ask imbalance
   → BinanceLiqFeed.run()              Binance Futures forceOrder → 2-min rolling liquidations
   → Analyzer.run()
       _analysis_loop()                GBM fair value + recommendation (every 50 ms)
-      _bias_refresher()               RSI/BB/ADX + DVOL + OKX funding (every 15 s, throughout window)
+      _bias_refresher()               RSI/BB/ADX + DVOL + OKX funding (every 15 s)
       _window_resolver()              settlement + accuracy tracking (every 1 s)
-  → Executor
-      maybe_trade()                   fill based on locked model recommendation
+  → LiveExecutor / Executor
+      maybe_trade()                   place limit order on lock, hold to settlement
   → FastAPI/Uvicorn                   dashboard HTTP + WebSocket server
 ```
-
-All components share a single `StateManager` in-memory hub. Feeds write into it, the analyzer reads from it, and the dashboard streams snapshots over WebSocket every time state changes.
-
----
-
-## Strike price resolution
-
-At contract discovery the bot resolves the BTC window-open strike in priority order:
-
-1. Numeric fields from the Kalshi API (`floor_strike`, `cap_strike`, `strike`)
-2. Regex parse of subtitle/title text (e.g. "Above $81,775.15")
-3. Ticker suffix (e.g. `KXBTC15M-26MAY2016-T81775.15`)
-4. Coinbase Exchange historical candle for the window-open timestamp
-5. In-memory BTC price history, or the current live price as a last resort
 
 ---
 
@@ -199,23 +171,25 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TRADING_MODE` | `paper` | `paper` or `live` |
 | `KALSHI_ENV` | required | `demo` or `prod` |
 | `KALSHI_API_KEY_ID` | — | Kalshi API key ID |
 | `KALSHI_PRIVATE_KEY_B64` | — | Base64-encoded PEM private key |
-| `BTC_SERIES_TICKER` | `KXBTCD` | Series ticker for contract auto-discovery |
+| `BTC_SERIES_TICKER` | `KXBTC15M` | Series ticker for contract auto-discovery |
+| `TRADE_SIZE_USD` | `15.00` | Dollar amount per trade (converted to fractional contracts) |
 | `BANKROLL` | `250.00` | Starting paper bankroll |
-| `BTC_SIGMA` | `0.80` | Fallback annualized vol for GBM when DVOL unavailable |
-| `MAX_ENTRY_WINDOW_S` | `600.0` | Entry window opens when seconds remaining crosses this (10:00 mark) |
-| `MIN_ENTRY_WINDOW_S` | `120.0` | Too-late threshold — entry window closes below this (2:00 mark) |
-| `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike to show as bullish/bearish in signal panel |
-| `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire (≈ $18/min) |
-| `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause flag |
-| `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before monitoring data counts |
+| `BTC_SIGMA` | `0.35` | Annualized vol fallback for GBM when DVOL unavailable |
+| `MAX_ENTRY_WINDOW_S` | `300.0` | Entry window opens when seconds remaining crosses this (5:00 mark) |
+| `MIN_ENTRY_WINDOW_S` | `120.0` | Entry window closes below this (2:00 mark) |
+| `MOMENTUM_ENTRY_USD` | `20.0` | Min BTC move from strike to show as bullish/bearish |
+| `BTC_SLOPE_SIGNAL_THRESHOLD` | `0.30` | Min \|slope\| in $/s for slope signal to fire |
+| `MOMENTUM_THRESHOLD_USD` | `150.0` | BTC move in 10 s that triggers a 30-second velocity-pause |
+| `NEW_WINDOW_SETTLE_S` | `15.0` | Grace period after contract discovery before data counts |
 | `MIN_ADX_THRESHOLD` | `15.0` | ADX below this suppresses all RSI/BB bias signals |
-| `FUTURES_TAKER_RATIO_HIGH` | `1.15` | Taker ratio above this flags long-heavy (informational) |
-| `FUTURES_TAKER_RATIO_LOW` | `0.85` | Taker ratio below this flags short-heavy (informational) |
-| `BINANCE_DEPTH_IMBALANCE_THRESHOLD` | `0.15` | Smoothed depth imbalance magnitude for informational signal |
-| `LIQ_VETO_THRESHOLD_USD` | `500000` | 2-min rolling liquidation USD for informational signal |
+| `FUTURES_TAKER_RATIO_HIGH` | `1.15` | Taker ratio above this flags long-heavy |
+| `FUTURES_TAKER_RATIO_LOW` | `0.85` | Taker ratio below this flags short-heavy |
+| `BINANCE_DEPTH_IMBALANCE_THRESHOLD` | `0.15` | Smoothed depth imbalance magnitude threshold |
+| `LIQ_VETO_THRESHOLD_USD` | `500000` | 2-min rolling liquidation USD threshold |
 | `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind host |
 | `DASHBOARD_PORT` | `8000` | Dashboard port |
 
@@ -225,12 +199,11 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 
 | File | Contents |
 |------|----------|
-| `logs/session_<ts>.csv` | Every analysis event this session (recommendations, fills, errors) |
-| `logs/kelly_<ts>.log` | Kelly decision log — entry skips, sizing details, p_true/p_market per trade |
-| `logs/predictions.csv` | Cross-session prediction outcomes with resolution and model accuracy |
-| `logs/lifetime_stats.json` | Persisted prediction accuracy counters across all sessions |
+| `logs/session_<ts>.csv` | Every analysis event this session |
+| `logs/predictions.csv` | Cross-session prediction outcomes |
+| `logs/lifetime_stats.json` | Prediction accuracy counters across all sessions |
 | `logs/executor_bankroll.json` | Trade P&L — persists across restarts |
-| `logs/resolution_history.json` | Last 100 window resolutions with model accuracy labels |
+| `logs/resolution_history.json` | Last 100 window resolutions |
 
 ---
 
@@ -238,36 +211,27 @@ At contract discovery the bot resolves the BTC window-open strike in priority or
 
 The live dashboard at `http://127.0.0.1:8000` displays:
 
-- **GBM YES %** — current fair-value probability with confidence tier (Neutral / Moderate / Strong / Extreme)
-- **Live Edge (GBM − Mid)** — GBM fair value minus Kalshi market mid in cents; green when YES is underpriced (> +10¢), red when NO is underpriced (< −10¢), glows at ±15¢
-- **BTC Price** — 4-exchange equal-weighted average with per-source breakdown (CB / KR / BS / GE)
+- **GBM YES %** — current fair-value probability
+- **Live Edge (GBM − Mid)** — GBM fair value minus Kalshi market mid in cents
+- **BTC Price** — 4-exchange equal-weighted average
 - **BTC Slope** — weighted $/s velocity over 90s and 300s windows
-- **CVD** — cumulative volume delta from Coinbase trade stream (net buy BTC since window open)
-- **Depth Imbalance** — 30-second smoothed top-10 bid/ask quantity imbalance (−1 to +1)
-- **Perp Basis** — Kraken PI_XBTUSD mark − index (30 s smoothed); fires as informational signal at ±$50; green/bull-lead coloring at > +$80, red/bear-lead coloring at < −$80 (also the slope-gate bypass threshold)
-- **Funding Rate** — OKX perp funding rate (informational)
-- Recommendation panel with lock confidence block (GBM at lock time + gap vs market)
+- **CVD** — cumulative volume delta from Coinbase trade stream
+- **Depth Imbalance** — 30-second smoothed top-10 bid/ask imbalance
+- **Perp Basis** — Kraken PI_XBTUSD mark − index (30 s smoothed)
+- **Funding Rate** — OKX perp funding rate
+- Recommendation panel with lock status
 - BTC sparkline with window-open strike line
 - Bot executor P&L and current position
 - Resolution log with per-window model accuracy
-
-### Resolution log format
-
-```
-KXBTC15M-26MAY151600-00  BTC 79096.27  (+14.65)  → YES [Kalshi]  model=YES [CORRECT]  slope=CORRECT
-```
-
-- **`→ YES / NO`** — what Kalshi settled
-- **`[Kalshi]`** — result from live API; `[estimated]` = API timed out, inferred from Coinbase price
-- **`model=YES [CORRECT/WRONG]`** — the locked recommendation and whether it was right
-- **`slope=CORRECT/WRONG`** — GBM slope direction accuracy (tracked separately)
-- **Green** = model predicted and was correct; **Red** = predicted and wrong; **Gray** = no prediction that window
 
 ---
 
 ## Notes
 
-- **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract. At 40¢ entry, round-trip taker cost is ~1.7¢ per contract. Not deducted from paper sizing.
+- **No price ceiling.** The bot trades at any price above 20¢. High-price (90-99¢) trades have tiny wins but >99% win rate and are net positive over time.
+- **Always taker.** All orders are placed at the current ask price for immediate fill. No maker/resting orders — eliminates cancelled-order losses.
+- **Settlement hold.** No exits mid-window. The bot enters once per window on model lock and holds to settlement. P&L is realised when Kalshi settles the contract.
+- **Fees.** Kalshi taker fees ≈ 7% × p × (1−p) per contract. At 60¢ entry, round-trip taker cost is ~1.7¢ per contract. Not deducted from paper sizing.
+- **Fractional contracts.** Kalshi markets have `fractional_trading_enabled`. The bot sends fractional contract counts for exact dollar-based sizing.
+- **GBM sigma.** `BTC_SIGMA=0.35` matches Deribit DVOL. The fallback is only used when the DVOL feed is unavailable; an incorrect value here silently breaks the GBM signal.
 - **Settlement accuracy.** Queries Kalshi's API for the official BRTI-based result. Falls back to a Coinbase-price estimate if the API doesn't return within 2 minutes, tagged `[estimated]`.
-- **GBM sigma source.** Uses Deribit DVOL (implied vol) when tau > 3 min. Switches to 5-min rolling realized vol when tau < 3 min — DVOL overestimates short-horizon variance and makes the model too uncertain near settlement.
-- **Perp basis lead signal.** Kraken PI_XBTUSD basis (mark − index) is smoothed over 30 seconds. Acts as an informational supporting signal when |basis| > $50. A sustained premium > $80 additionally bypasses the slope-confirmation gate for YES locks (and vice-versa for discounts and NO locks).
