@@ -1,8 +1,8 @@
 """
 Live trade executor — places real orders on Kalshi via the REST API.
 
-On lock: for small GBM gaps (<15¢) posts a maker limit at min(bid+1, ask-1);
-for large gaps (≥15¢) takes the ask directly. Holds the order for the entire
+On lock: always takes the ask (taker order) to ensure immediate fills and avoid
+adverse selection on maker limits. Holds the order for the entire
 entry window, polling for fill every 2 s. Cancels if GBM goes neutral or window
 closes. Position sizing is flat: cfg.trade_size_usd per trade.
 
@@ -35,18 +35,22 @@ class LiveExecutor(Executor):
 
     def __init__(self, state: StateManager, cfg: Settings, logger=None):
         super().__init__(state, cfg, logger)
-        self._pending_order_id: Optional[str] = None
-        self._pending_contract: Optional[str] = None
-        self._pending_side:     Optional[str] = None
-        self._pending_n:        int   = 0
-        self._pending_price:    float = 0.0
-        self._last_poll_ts:     float = 0.0
+        self._pending_order_id:  Optional[str] = None
+        self._pending_contract:  Optional[str] = None
+        self._pending_side:      Optional[str] = None
+        self._pending_n:         int   = 0
+        self._pending_price:     float = 0.0
+        self._pending_placed_at:   float = 0.0
+        self._last_poll_ts:        float = 0.0
+        self._ceiling_skip_logged: bool  = False
+        self._floor_skip_logged:   bool  = False
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
     async def startup(self) -> None:
         self.state.trading_mode = "live"
         await self._sync_balance(is_startup=True)
+        await self._sync_position()
         await self.state.log_event(
             f"🟢 Live — balance ${self.state.executor_bankroll:.2f}"
         )
@@ -55,6 +59,10 @@ class LiveExecutor(Executor):
     # ── Entry override ────────────────────────────────────────────────────────
 
     async def maybe_trade(self) -> None:
+        # Daily stop loss — halt trading if session down more than $50
+        if self.state.executor_session_pnl < -50.0:
+            return
+        
         contract = self.state.active_contract
 
         # ── Exit checks for open positions ────────────────────────────────────
@@ -78,23 +86,41 @@ class LiveExecutor(Executor):
         if entry is None:
             return
 
-        # Always take the ask — matches backtest fill assumption, eliminates cancelled orders
         ob   = self.state.orderbook
         side = entry["side"]
 
         if side == "YES":
             ask = ob.best_ask()
-            limit_price = ask if ask is not None else entry["price"]
+            if ask is None:
+                return
+            limit_price = ask
         else:
             yes_bid = ob.best_bid()
-            limit_price = (100.0 - yes_bid) if yes_bid is not None else entry["price"]
+            if yes_bid is None:
+                return
+            limit_price = 100.0 - yes_bid
+
+        # ── 55¢ ceiling — keep retrying, don't set _attempted_contract ────────
+        if limit_price > 55.0:
+            if not self._ceiling_skip_logged:
+                await self.state.log_event(
+                    f"⏭ Skipped {side} — {limit_price:.0f}¢ above 55¢ ceiling"
+                )
+                self._ceiling_skip_logged = True
+            return  # no _attempted_contract — retries next tick
+
+        self._ceiling_skip_logged = False
+        # ─────────────────────────────────────────────────────────────────────
 
         if limit_price < 20.0:
-            await self.state.log_event(
-                f"⏭ Skipped {side} — entry {limit_price:.0f}¢ below 20¢ floor (GBM/slope noise)"
-            )
-            self._attempted_contract = entry["contract"]
-            return
+            if not self._floor_skip_logged:
+                await self.state.log_event(
+                    f"⏭ Skipped {side} — entry {limit_price:.0f}¢ below 20¢ floor"
+                )
+                self._floor_skip_logged = True
+            return  # no _attempted_contract — retries next tick
+
+        self._floor_skip_logged = False
 
         n_contracts = max(1, int(self.cfg.trade_size_usd / (limit_price / 100.0)))
         yes_price   = _to_yes_price(entry["side"], limit_price)
@@ -109,12 +135,13 @@ class LiveExecutor(Executor):
             self._attempted_contract = entry["contract"]
             return
 
-        self._pending_order_id = order_id
-        self._pending_contract = entry["contract"]
-        self._pending_side     = entry["side"]
-        self._pending_n        = n_contracts
-        self._pending_price    = limit_price
-        self._last_poll_ts     = time.monotonic()
+        self._pending_order_id  = order_id
+        self._pending_contract  = entry["contract"]
+        self._pending_side      = entry["side"]
+        self._pending_n         = n_contracts
+        self._pending_price     = limit_price
+        self._pending_placed_at = time.monotonic()
+        self._last_poll_ts      = time.monotonic()
         await self.state.log_event(
             f"⏳ {entry['side']} taker {n_contracts}×{limit_price:.0f}¢"
             f"  gap {entry['gap']:+.1f}¢"
@@ -125,36 +152,62 @@ class LiveExecutor(Executor):
         current_fv = self.state.analysis.get("fv")
         if current_fv is not None:
             side = self._pending_side
-            if (side == "NO" and current_fv >= 50.0) or (side == "YES" and current_fv <= 50.0):
+            if (side == "NO" and current_fv >= 55.0) or (side == "YES" and current_fv <= 45.0):
                 contract = self._pending_contract
                 await self._cancel_order(self._pending_order_id)
-                await self.state.log_event(
-                    f"⏳ {side} limit cancelled — GBM neutral {current_fv:.0f}¢"
-                )
-                self._clear_pending()
-                self._attempted_contract = contract
-                return
+                if await self._check_order_filled(self._pending_order_id):
+                    await self.state.log_event(
+                        f"⏳ {side} cancel-raced fill — recording position"
+                    )
+                    # fall through to record position below
+                else:
+                    await self.state.log_event(
+                        f"⏳ {side} limit cancelled — GBM reversed {current_fv:.0f}¢"
+                    )
+                    self._clear_pending()
+                    self._attempted_contract = contract
+                    return
 
         # Cancel when the entry window has closed
         phase = self.state.analysis.get("phase")
         if phase not in ("entry_open",):
             contract = self._pending_contract
             await self._cancel_order(self._pending_order_id)
-            await self.state.log_event(
-                f"⏳ {self._pending_side} limit cancelled — window closing"
-            )
-            self._clear_pending()
-            self._attempted_contract = contract
-            return
+            if await self._check_order_filled(self._pending_order_id):
+                await self.state.log_event(
+                    f"⏳ {self._pending_side} cancel-raced fill — recording position"
+                )
+                # fall through to record position below
+            else:
+                await self.state.log_event(
+                    f"⏳ {self._pending_side} limit cancelled — window closing"
+                )
+                self._clear_pending()
+                self._attempted_contract = contract
+                return
 
-        # Poll for fill every _ORDER_POLL_S seconds
+        # Application-level IOC: cancel after 1.5s if not filled, then retry with fresh price
         now = time.monotonic()
-        if now - self._last_poll_ts < _ORDER_POLL_S:
+        if now - self._pending_placed_at >= 1.5 and self._pending_placed_at > 0:
+            filled = await self._check_order_filled(self._pending_order_id)
+            if not filled:
+                await self._cancel_order(self._pending_order_id)
+                # Re-check: order may have filled between our check and the cancel
+                filled = await self._check_order_filled(self._pending_order_id)
+                if not filled:
+                    await self.state.log_event(
+                        f"⏳ {self._pending_side} order unfilled after 1.5s — retrying with fresh price"
+                    )
+                    self._clear_pending()
+                    return  # no _attempted_contract — retries next tick at updated price
+                # Filled during the cancel window — fall through to record position
+            # Was filled during the check window — fall through to record position
+        elif now - self._last_poll_ts < _ORDER_POLL_S:
             return
-        self._last_poll_ts = now
-
-        if not await self._check_order_filled(self._pending_order_id):
-            return
+        else:
+            self._last_poll_ts = now
+            if not await self._check_order_filled(self._pending_order_id):
+                return
 
         # Confirmed fill — record position
         contract = self._pending_contract
@@ -171,12 +224,13 @@ class LiveExecutor(Executor):
         self._clear_pending()
 
     def _clear_pending(self) -> None:
-        self._pending_order_id = None
-        self._pending_contract = None
-        self._pending_side     = None
-        self._pending_n        = 0
-        self._pending_price    = 0.0
-        self._last_poll_ts     = 0.0
+        self._pending_order_id  = None
+        self._pending_contract  = None
+        self._pending_side      = None
+        self._pending_n         = 0
+        self._pending_price     = 0.0
+        self._pending_placed_at = 0.0
+        self._last_poll_ts      = 0.0
 
     # ── Kalshi REST helpers ───────────────────────────────────────────────────
 
@@ -251,10 +305,53 @@ class LiveExecutor(Executor):
             self.state._save_executor_bankroll()
         self.state._dirty.set()
 
+    async def _fetch_kalshi_positions(self) -> list[dict]:
+        url  = self.cfg.kalshi_rest_base + "/portfolio/positions"
+        path = urlparse(url).path
+        headers = _make_rest_headers(self.cfg, "GET", path)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                return resp.json().get("market_positions", [])
+        except Exception:
+            return []
+
+    async def _sync_position(self) -> None:
+        """Reconcile bot position state against Kalshi's actual open positions."""
+        contract = self.state.active_contract
+        if not contract:
+            return
+        # Already tracking an open position — nothing to reconcile
+        if self.state.position.get("status") == "open":
+            return
+        positions = await self._fetch_kalshi_positions()
+        for p in positions:
+            if p.get("ticker") != contract:
+                continue
+            yes_pos = p.get("position", 0)   # positive = long YES, negative = long NO
+            if yes_pos == 0:
+                continue
+            side      = "YES" if yes_pos > 0 else "NO"
+            contracts = abs(yes_pos)
+            # Use current market mid as a best-effort fill price estimate
+            ob        = self.state.orderbook
+            bid, ask  = ob.best_bid(), ob.best_ask()
+            if side == "YES":
+                fill_price = ask or (bid or 50.0)
+            else:
+                fill_price = (100.0 - bid) if bid else 50.0
+            await self.state.open_position(contract, side, contracts, fill_price, "live")
+            await self.state.log_event(
+                f"🔄 Position sync: found {side} {contracts}× on {contract} — recorded"
+            )
+            break
+
     async def _balance_sync_loop(self) -> None:
         while True:
             await asyncio.sleep(_BALANCE_SYNC_S)
             await self._sync_balance()
+            await self._sync_position()
 
 
 def _to_yes_price(side: str, price: float) -> int:

@@ -41,9 +41,9 @@ GBM_YES_MIN    = 60.0           # fv must exceed this to consider YES
 GBM_NO_MAX     = 40.0           # fv must be below this to consider NO
 LOCK_MINUTES   = 1              # consecutive minutes GBM must hold side before locking
 ENTRY_START    = 10             # minute index where entry window opens (300 s left)
-ENTRY_END      = 13             # minute index where entry window closes (120 s left)
+ENTRY_END      = 14             # minute index where entry window closes (120 s left = minute 13)
 LARGE_GAP_C    = 0.0           # ¢ — take ask instead of posting maker
-CEILING_C      = 85.0           # ¢ — hard cap; above this post resting limit at ceiling
+CEILING_C      = 55.0           # ¢ — hard cap; above this post resting limit at ceiling
 FLOOR_C        = 20.0           # ¢ — skip if entry price below this (illiquid / GBM noise)
 SLOPE_OPPOSE_THRESHOLD = 0.10   # $/s — block if slope actively opposes direction (overridable via --slope-threshold)
 
@@ -56,10 +56,10 @@ def _ncdf(x: float) -> float:
 
 SLOPE_CAP_S = 90.0  # live bot caps slope projection at 90 s
 
-def gbm_fv(btc: float, btc_open: float, tau_s: float, slope: float = 0.0) -> float:
+def gbm_fv(btc: float, btc_open: float, tau_s: float, slope: float = 0.0, sigma: float = SIGMA) -> float:
     if btc_open <= 0 or tau_s <= 0:
         return 100.0 if btc >= btc_open else 0.0
-    vol = SIGMA * math.sqrt(tau_s / YEAR_S)
+    vol = sigma * math.sqrt(tau_s / YEAR_S)
     if vol <= 0:
         return 100.0 if btc >= btc_open else 0.0
     drift = slope * min(tau_s, SLOPE_CAP_S)
@@ -71,34 +71,50 @@ def gbm_fv(btc: float, btc_open: float, tau_s: float, slope: float = 0.0) -> flo
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--sigma", type=float, default=SIGMA,
+                        help=f"GBM volatility sigma (default {SIGMA})")
     parser.add_argument("--no-slope-filter", action="store_true",
                         help="Disable the slope-opposing guard")
     parser.add_argument("--no-ceiling",      action="store_true",
                         help="Remove 85¢ ceiling — take trades at whatever the ask is")
+    parser.add_argument("--ceiling", type=float, default=None,
+                        help="Hard ceiling in cents (e.g. 75 = skip/cap at 75¢). Overrides --no-ceiling.")
+    parser.add_argument("--skip-ceiling", action="store_true",
+                        help="When ask > ceiling, skip the trade entirely instead of posting a resting limit")
     parser.add_argument("--min-gap", type=float, default=None,
                         help="Min GBM-vs-market edge in cents to take a trade (e.g. 0 = positive edge only)")
     parser.add_argument("--no-reversal-guard", action="store_true",
                         help="Disable the early-window GBM reversal guard")
     parser.add_argument("--entry-start", type=int, default=ENTRY_START,
                         help=f"Minute index where entry window opens (default {ENTRY_START} = {15-ENTRY_START} min left)")
-    parser.add_argument("--strong-tier", type=float, default=15.0,
-                        help="Min |fv-50| to lock (default 15 = 65%% YES / 35%% NO threshold)")
+    parser.add_argument("--strong-tier", type=float, default=20.0,
+                        help="Min |fv-50| to lock (default 20 = 70%% YES / 30%% NO threshold)")
     parser.add_argument("--lock-minutes", type=int, default=LOCK_MINUTES,
                         help=f"Consecutive minutes GBM must hold before locking (default {LOCK_MINUTES})")
     parser.add_argument("--slope-threshold", type=float, default=SLOPE_OPPOSE_THRESHOLD,
                         help=f"$/s slope opposition threshold (default {SLOPE_OPPOSE_THRESHOLD})")
     parser.add_argument("--hours", type=str, default=None,
                         help="Only include windows in this UTC hour range, e.g. 13-21")
+    parser.add_argument("--floor", type=float, default=None,
+                        help="Min entry price in cents to take a trade (e.g. 35 = skip trades below 35¢). Overrides FLOOR_C.")
+    parser.add_argument("--require-slope-agree", action="store_true",
+                        help="Require slope to actively confirm direction (not just not oppose). YES needs slope > +threshold, NO needs slope < -threshold.")
+    parser.add_argument("--slippage", type=float, default=0.0,
+                        help="Slippage penalty in cents added to every fill price (e.g. 5 = 5¢ worse fill).")
     args = parser.parse_args()
 
-    no_ceiling = args.no_ceiling
+    no_ceiling = args.no_ceiling if args.ceiling is None else False
+    ceiling_c  = args.ceiling if args.ceiling is not None else CEILING_C
+    floor_c    = args.floor if args.floor is not None else FLOOR_C
+    sigma      = args.sigma
     entry_start = args.entry_start
     strong_tier = args.strong_tier
     hour_range: tuple[int, int] | None = None
     if args.hours:
         start_h, end_h = map(int, args.hours.split("-"))
         hour_range = (start_h, end_h)
-    use_slope_filter = not args.no_slope_filter
+    use_slope_filter    = not args.no_slope_filter
+    require_slope_agree = args.require_slope_agree
 
     print("Loading data...")
     candles = json.loads(CACHE_FILE.read_text())
@@ -150,7 +166,7 @@ def main() -> None:
             tau_s      = (15 - mn) * 60
             btc_prev   = btc_at(open_ts + (mn - 1) * 60)
             slope      = ((btc_now - btc_prev) / 60.0) if btc_prev else 0.0
-            fv         = gbm_fv(btc_now, btc_open, tau_s, slope)
+            fv         = gbm_fv(btc_now, btc_open, tau_s, slope, sigma=sigma)
 
             # Record GBM at entry window open for reversal guard
             if early_fv is None:
@@ -202,6 +218,14 @@ def main() -> None:
                 skipped["slope"] += 1
                 break
 
+            slope_agrees = (
+                (raw_side == "YES" and slope >  args.slope_threshold) or
+                (raw_side == "NO"  and slope < -args.slope_threshold)
+            )
+            if require_slope_agree and not slope_agrees:
+                skipped["slope_no_agree"] += 1
+                continue
+
             # ── Compute limit price ───────────────────────────────────────────
             yes_ask = c["yes_ask"]
             yes_bid = c["yes_bid"]
@@ -226,15 +250,18 @@ def main() -> None:
                 skipped["gap_filter"] += 1
                 break
 
-            # ── 20¢ floor ─────────────────────────────────────────────────────
-            if limit_px * 100 < FLOOR_C:
+            # ── price floor ───────────────────────────────────────────────────
+            if limit_px * 100 < floor_c:
                 skipped["floor"] += 1
                 break
 
-            # ── 85¢ ceiling ───────────────────────────────────────────────────
+            # ── price ceiling ─────────────────────────────────────────────────
             resting_at_ceiling = False
-            if not no_ceiling and limit_px * 100 > CEILING_C:
-                limit_px           = CEILING_C / 100.0
+            if not no_ceiling and limit_px * 100 > ceiling_c:
+                if args.skip_ceiling:
+                    skipped["ceiling_skip"] += 1
+                    continue
+                limit_px           = ceiling_c / 100.0
                 resting_at_ceiling = True
 
             entry = {
@@ -272,6 +299,9 @@ def main() -> None:
             if fill_px is None:
                 skipped["ceiling_no_fill"] += 1
                 continue
+
+        # ── Apply slippage ────────────────────────────────────────────────────
+        fill_px = min(fill_px + args.slippage / 100.0, 0.99)
 
         # ── Compute PnL ───────────────────────────────────────────────────────
         n_contracts = max(1, int(TRADE_SIZE_USD / fill_px))
@@ -338,17 +368,19 @@ def main() -> None:
     losses     = [t for t in trades if not t["won"]]
     total_pnl  = sum(t["pnl"] for t in trades)
 
-    slope_label   = "no slope filter" if not use_slope_filter else "slope filter ON"
-    ceiling_label = "no ceiling" if no_ceiling else f"≤{CEILING_C:.0f}¢ ceiling"
+    slope_label   = "no slope filter" if not use_slope_filter else ("slope agree required" if require_slope_agree else "slope filter ON")
+    ceiling_label = "no ceiling" if no_ceiling else f"≤{ceiling_c:.0f}¢ ceiling"
+    floor_label   = f"≥{floor_c:.0f}¢ floor"
     gap_label     = f"gap≥{args.min_gap:+.0f}¢" if args.min_gap is not None else "no gap filter"
     reversal_label = "no reversal guard" if args.no_reversal_guard else "reversal guard ON"
     entry_label   = f"entry@min{entry_start}({15-entry_start}min)" if entry_start != ENTRY_START else "entry@min10(5min)"
-    tier_label    = f"tier={50+strong_tier:.0f}%" if strong_tier != 15.0 else "tier=65%"
+    tier_label    = f"tier={50+strong_tier:.0f}%/{50-strong_tier:.0f}%"
     lock_label    = f"lock={args.lock_minutes}min"
     slope_thresh_label = f"slope>{args.slope_threshold:.2f}"
+    slip_label         = f"slip={args.slippage:.0f}¢" if args.slippage else "no slippage"
     print(f"\n{'━'*72}")
     print(f"  BACKTEST  {date_start} → {date_end}  |  "
-          f"σ={SIGMA}  ${TRADE_SIZE_USD:.0f}/trade  [{slope_label}  {ceiling_label}  {gap_label}  {reversal_label}  {entry_label}  {tier_label}  {lock_label}  {slope_thresh_label}]")
+          f"σ={sigma}  ${TRADE_SIZE_USD:.0f}/trade  [{slope_label}  {floor_label}  {ceiling_label}  {gap_label}  {reversal_label}  {entry_label}  {tier_label}  {lock_label}  {slope_thresh_label}  {slip_label}]")
     print(f"{'━'*72}")
     print(f"  {'Date':<12} {'Trades':>6} {'W/L':>6}  {'Day P&L':>9}  {'Balance':>9}  Bar")
     print(f"  {'─'*10} {'─'*6} {'─'*6}  {'─'*9}  {'─'*9}  {'─'*20}")
@@ -413,7 +445,7 @@ def main() -> None:
     ceiling_trades = [t for t in trades if t["ceiling"]]
     if ceiling_trades:
         wr_ = sum(1 for t in ceiling_trades if t["won"]) / len(ceiling_trades) * 100
-        print(f"\n  ── Resting-limit trades (ask > 85¢, posted @85¢) ─────────────")
+        print(f"\n  ── Resting-limit trades (ask > {ceiling_c:.0f}¢, posted @{ceiling_c:.0f}¢) ─────────────")
         print(f"    {len(ceiling_trades)} fills  {wr_:.1f}% win  "
               f"total ${sum(t['pnl'] for t in ceiling_trades):+.2f}")
 
